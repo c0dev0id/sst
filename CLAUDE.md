@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-Pre-implementation. The full specification lives in `README.md`. No build system, test framework, or language has been committed to yet.
+Pre-implementation. The full specification lives in `README.md`. Stack is decided; no code written yet.
 
-Known constraint: **libsignal-protocol-c is already installed** on the system — use it.
+**Stack:** Rust · presage (Signal client) · ratatui (TUI) · Cargo
 
 ---
 
@@ -15,14 +15,12 @@ Known constraint: **libsignal-protocol-c is already installed** on the system �
 Two main views with a shared authentication pre-flight:
 
 ### Auth Flow
-- On startup, check for a stored auth token.
-- If absent (or `--relink` flag), run the QR code auth flow (display QR, wait for Signal mobile app to scan).
-- On success, proceed to Chat List.
-- **Implementation note:** The provisioning/device-linking mechanism in `libsignal-protocol-c` needs investigation before the auth flow can be implemented.
+- On startup, check presage's SQLite store for a stored registration.
+- If absent (or `--relink` flag), call `Manager::link_secondary_device()` — it sends a provisioning URL via a `oneshot` channel; render that URL as a terminal QR code and wait. On scan, presage returns a registered `Manager`. Proceed to Chat List.
 
 ### Chat List View
 - One line per chat, sorted most-recent-first. Unread chats prefixed with `*`.
-- Format: `<Full Name>: <truncated preview>` for 1:1; `<Group Name>: <truncated preview>` for named groups; `<First, Names>: <truncated preview>` for unnamed groups.
+- Format: `<Full Name>: <truncated preview>` for 1:1; `<Group Name>: <truncated preview>` for groups (groups always have a title — no unnamed-group fallback needed).
 - Keys: ↑/↓ to navigate, PgUp/PgDn to scroll, Return to open, `Q` to quit, `d` to delete (with confirmation).
 - List scrolls automatically at screen edges, keeping one entry of context above/below selection.
 
@@ -74,15 +72,14 @@ Slash command autocomplete follows the same Tab logic as `@mentions`: single Tab
 
 ## Open Design Questions
 
-- **QR auth flow:** How does `libsignal-protocol-c` expose device provisioning? Needs investigation.
-- **Read receipts:** What granularity does `libsignal-protocol-c` expose? Spec assumes per-message delivered/seen.
 - **Chat list unread:** Visual treatment beyond `*` prefix (bold? color?).
 
 ---
 
-## Implementation Notes for Future Sessions
+## Implementation Notes
 
-- `libsignal-protocol-c` provides the Signal Protocol crypto/session layer; do not reimplement it.
-- The TUI layer must handle terminal resize gracefully (message area reflows; status/input bars stay pinned to bottom).
+- presage's `receive_messages()` returns `Stream<Item = Received>` — drive this from the main async loop and forward events to the TUI via a channel.
 - Autocomplete state is transient UI state — keep it out of the message/session model.
 - Message selection state is also transient — a separate highlight cursor that does not affect scroll position.
+- The TUI layer must handle terminal resize gracefully (message area reflows; status/input bars stay pinned to bottom). ratatui redraws on each frame; SIGWINCH triggers a resize event via crossterm.
+- Do not use `libsignal-protocol-c` (the installed C library) — it is crypto-only and irrelevant given presage.

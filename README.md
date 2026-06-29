@@ -4,17 +4,17 @@ Terminal UI client for Signal.
 
 **Features:** QR code device linking · typing notifications · read receipts · message reactions · quoted replies · @mention autocomplete · slash command autocomplete
 
+**Stack:** Rust · [presage](https://github.com/whisperfish/presage) · [ratatui](https://github.com/ratatui/ratatui)
+
 ---
 
 ## Auth Flow
 
 On startup:
 
-1. Check for a stored auth token.
-2. If absent (or `--relink` is passed), display a QR code and wait for it to be scanned in the Signal mobile app.
-3. On success, proceed to the Chat List.
-
-> **Note:** The QR code device-linking mechanism depends on how `libsignal-protocol-c` exposes the provisioning flow — this needs investigation before implementation.
+1. Check for a stored auth token (presage's SQLite store).
+2. If absent (or `--relink` is passed), call `Manager::link_secondary_device()` — this yields a provisioning URL which is rendered as a QR code in the terminal. Wait for it to be scanned in the Signal mobile app.
+3. On success, presage returns a fully registered `Manager`. Proceed to the Chat List.
 
 ---
 
@@ -25,10 +25,8 @@ One line per conversation, sorted most-recent-first. Unread chats are marked wit
 **Format:**
 - 1:1: `<Full Name>: <truncated last message preview>`
   - `Florian Heß: This is a test message that gets truncated on the right...`
-- Group (named): `<Group Name>: <truncated last message preview>`
+- Group: `<Group Name>: <truncated last message preview>`
   - `Weekend Plans: This is the last message, which is also truncated...`
-- Group (unnamed): `<First, Names, ...>: <truncated last message preview>`
-  - `Florian, Andreas, Dominik: This is the last message, which is also truncated...`
 
 **Keys:**
 
@@ -190,6 +188,4 @@ Autocomplete follows the same Tab logic as `@mentions` — single Tab completes 
 
 ## Open Questions
 
-- **Read receipts:** Need to verify what `libsignal-protocol-c` exposes and at what granularity.
-- **QR device linking:** Investigate how `libsignal-protocol-c` handles the provisioning flow.
 - **Chat list unread:** Visual treatment beyond `*` prefix (bold? color?).
