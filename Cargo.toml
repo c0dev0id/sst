@@ -3,6 +3,10 @@ name = "simple-signal-tui"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "sst"
+path = "src/main.rs"
+
 [dependencies]
 presage = { git = "https://github.com/whisperfish/presage", rev = "c363731038acf176ab6b5ee0600d7de85f8a2da8" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "c363731038acf176ab6b5ee0600d7de85f8a2da8", default-features = false }
