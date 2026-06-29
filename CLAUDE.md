@@ -16,54 +16,73 @@ Two main views with a shared authentication pre-flight:
 
 ### Auth Flow
 - On startup, check for a stored auth token.
-- If absent (or `--relink` flag), run the QR code auth flow.
+- If absent (or `--relink` flag), run the QR code auth flow (display QR, wait for Signal mobile app to scan).
 - On success, proceed to Chat List.
+- **Implementation note:** The provisioning/device-linking mechanism in `libsignal-protocol-c` needs investigation before the auth flow can be implemented.
 
 ### Chat List View
-- One line per chat, sorted most-recent-first.
-- Format: `<Full Name>: <truncated last message preview>` for 1:1, `Group: <comma-separated first names>: <truncated preview>` for groups.
-- Keys: arrow keys to navigate, Return to open, `Q` to quit, `d` to delete (with confirmation prompt).
+- One line per chat, sorted most-recent-first. Unread chats prefixed with `*`.
+- Format: `<Full Name>: <truncated preview>` for 1:1; `<Group Name>: <truncated preview>` for named groups; `<First, Names>: <truncated preview>` for unnamed groups.
+- Keys: ↑/↓ to navigate, PgUp/PgDn to scroll, Return to open, `Q` to quit, `d` to delete (with confirmation).
+- List scrolls automatically at screen edges, keeping one entry of context above/below selection.
 
 ### Chat Window View
 Layout (top to bottom):
-1. **Message area** — scrollable thread with per-sender blocks:
-   - Reactions appended inline: `[1x❤, 3x👋]`
-   - Replies quote the original with `>` prefix; nested replies do NOT include the grandparent quote.
-2. **Status bar** — typing notifications (`X is typing…`, `X and Y are typing…`, `X, Y, and N more are typing…`). Also used for autocomplete disambiguation (see below).
-3. **Input bar** — single line, grows to two lines on Shift+Return (multi-line input).
+1. **Header** — contact or group name.
+2. **Message area** — scrollable thread, oldest at top, newest at bottom. Per-sender blocks with grouped consecutive messages.
+3. **Status bar** — typing notifications; overridden by autocomplete hints or message metadata during selection.
+4. **Input bar** — always focused; grows vertically without line cap.
+
+### Message Rendering
+- Reactions appended inline: `[1x❤, 3x👋]`
+- Replies quote the original with `>` prefix; nested replies do NOT include the grandparent quote (one level only).
+- Own messages identical in format; username is colored to distinguish.
+- Sent messages show `✓` (delivered) / `✓✓` (seen) read receipt indicator.
+- Timestamp separator `── 2026-06-26 09:00 ──` when gap between consecutive messages > 1h.
+- Unread boundary shown as `── new ──` separator.
 
 ### Input Bar Interactions
 
 | Input | Behaviour |
 |-------|-----------|
 | Return | Send message |
-| Shift+Return | Insert newline; input bar expands |
-| `@<partial><Tab>` | Complete username (unique match only; excludes self) |
-| `@<partial><Tab><Tab>` | Show all matches on status bar |
-| Shift+↑/↓ | Activate message selection mode |
-| Escape | Clear message selection |
+| Shift+Return | Insert newline; input bar grows |
+| Escape | Clear message selection (first press); return to Chat List (second press) |
+| `@<partial>Tab` | Complete username (unique match only; excludes self) |
+| `@<partial>Tab Tab` | Show all matches on status bar |
+| Shift+↑ | Activate selection at most recent message / move selection up |
+| Shift+↓ | Move selection down (no-op when no selection active) |
 
-When a message is selected, slash commands activate:
-- `/reply <text>` — reply to selected message
-- `/react <emoji-key>` — react to selected message (e.g. `thumbs-up`, `laugh`, `heart`, `wave`)
-- `/react` with no arg — show existing reactions on the selected message
-- `/react <partial><Tab>` — autocomplete emoji key; `/react <Tab>` lists all supported emojis on the status bar
+### Message Selection
+- Oldest messages are at top; Shift+↑ moves toward older messages, Shift+↓ toward newer.
+- No wrapping — Shift+↓ at the most recent message does nothing.
+- ESC clears selection entirely; next Shift+↑ starts fresh at most recent.
+- Message area scrolls automatically at edges during selection, keeping one message of context visible.
+- While selection is active: status bar shows full message metadata (sender, timestamp, delivery status) instead of typing notification.
 
-Slash command autocomplete follows the same Tab logic as `@mentions`: single Tab completes unique matches, double Tab shows all candidates on the status bar.
+### Slash Commands (require active selection)
+
+| Command | Action |
+|---------|--------|
+| `/reply <text>` | Send `<text>` as a reply to the selected message |
+| `/react <emoji-key>` | React to the selected message |
+| `/react` | Show existing reactions on selected message |
+
+Slash command autocomplete follows the same Tab logic as `@mentions`: single Tab completes on unique match, double Tab lists all candidates on status bar. Status bar restores on next keystroke or Backspace.
 
 ---
 
-## Open Design Questions (unresolved)
+## Open Design Questions
 
-- Chat list: how to indicate chats with unread messages.
-- Chat window: how to mark the unread boundary.
-- Chat window: timestamp display strategy — suggestion in spec is "show timestamp when gap > 1h"; also consider exposing full message metadata in the status bar when a message is highlighted.
+- **QR auth flow:** How does `libsignal-protocol-c` expose device provisioning? Needs investigation.
+- **Read receipts:** What granularity does `libsignal-protocol-c` expose? Spec assumes per-message delivered/seen.
+- **Chat list unread:** Visual treatment beyond `*` prefix (bold? color?).
 
 ---
 
 ## Implementation Notes for Future Sessions
 
 - `libsignal-protocol-c` provides the Signal Protocol crypto/session layer; do not reimplement it.
-- The TUI layer must handle terminal resize gracefully (message area reflow, status/input bar stay pinned to bottom).
+- The TUI layer must handle terminal resize gracefully (message area reflows; status/input bars stay pinned to bottom).
 - Autocomplete state is transient UI state — keep it out of the message/session model.
 - Message selection state is also transient — a separate highlight cursor that does not affect scroll position.

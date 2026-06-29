@@ -1,72 +1,195 @@
-# simple signal tui
+# simple-signal-tui
 
-Signal TUI client
+Terminal UI client for Signal.
 
-- uses libsignal-protocol-c (already installed)
-- supports authentication via qr code
-- supports typing notification
-- supports seen notification
+**Features:** QR code device linking · typing notifications · read receipts · message reactions · quoted replies · @mention autocomplete · slash command autocomplete
 
-Application Flow (new auth)
-- check if auth token is present, if not -> start auth flow (can be forced with parameter --relink)
+---
 
-Application Flow (existing auth)
-- show chat list / index
-  - format: one line per chat.
-    - normal chat: "<full name>: <truncated last message preview>"
-      Example: "Florian Heß: This is a test message that get's truncated on the right side of the available space. The message can be long..."
-    - group chat: "Group: <comma separated first names>: <truncated last message preview>"
-      Example: "Group: Florian, Andreas, Dominik: This is the last message, which is also truncated to stay on one line..."
-  - use can select chat with arrow keys, return enters the chat
-  - Q: quit application
-  - d: delete chat (ask for confirmation)
-  - most recent chat is on top
-- chat window:
-  - Chat Style
-    * Florian Heß:
-      Hello people!
-    * Andreas Schirra:
-      Hi Florian!
-    * Stefan Hagen:
-      Messages can be long and
-      contain line breaks
-    * Stefan Hagen:
-      Messages with reactions will have the reactions being added to the end of the message. [1x❤, 3x👋]
-    * Stefan Hagen:
-      > Florian Heß:
-      > Hello people!
-      Replies will quote the original message
-    * Andreas Schirra:
-      > Stefan Hagen:
-      > Replies will quote the original message
-      Replies of messages that contain replies, will not include the previous reply.
-  - At the bottom, there are two lines/bars: A status bar, a input bar
-    - Status bar: shows typing notifications:
-      Example (one person typing): Florian Heß is typing...
-      Example (two person typing): Florain and Andreas are typing...
-      Example (more than two person typing): Florian, Andrease, and 3 more are typing...
-    - Input bar: Bar that receives user input
-      - return: sends message
-      - shift + return: - wraps into a new line. The input bar grows into two lines. Can be repeated to create multi line input
-      - @<username>: will mention the user
-      - @andr<tab>: will try to complete the username from the list of people in the chat (excluding myself, so @<tab> would always complete the chat partner in a one to one chat). "andr" here is the example of a partial username.
-      - @and<tab>tab> or @<tab><tab>: "and" here is a partial username with multiple matches. <tab> would not complete it. A second <tab> would lead to all potential matches being displayed on the Status bar (replacing status bar content). The status bar content restores when the next character is typed.
-    - In the chat, a user can use the shift+arrow keys to highlight a chat message from a user.
-      - default: no message is selected
-      - shift+arrow up/down keys: message highlight is created and the user can highlight a previous message in the chat
-      - escape: escape clears the highlight
-      - When a highlight is set, the use has additional options in the input bar:
-        - /reply: if the user types /reply Hi Florian and has "[2026-06-26 09:23] Florian Heß: Hello people!" highlighted, this message would be replied on.
-        - /react: if the user types /react thumbs-up and has "[2026-06-26 09:23] Florian Heß: Hello people!" highlighted, this message would get a thumbs up emoji reaction
-        - /<tab> /rea<tab> /r<tab><tab>: Slash commends should autocomplete with the same tab logic as the user mention (<tab> completes if unique match, second tab would show match options on the status bar.
-        - /react th<tab>: we support autocomplete for the emoji keys...
-          - /react <tab>: <tab> without an emoji will show supported reaction emojis on the status bar. Example: 😄 laugh, 👍 thumbs-up, 👋 wave, ❤️ heart; the user would only enter the key, not the emoji itself - that's just preview.
-          - /react: react without any parameter would show existing reactions on the message
+## Auth Flow
 
-open questions:
-- index: how to mark chats with unread messages
-- chat: how to mark unread messages
-- chat: how to display a time stamp at reasonable times to not clutter chat.. maybe once when a message has been received and more that 1h has passed? maybe we can show more message data in the status bar while message highlight is active?
+On startup:
 
+1. Check for a stored auth token.
+2. If absent (or `--relink` is passed), display a QR code and wait for it to be scanned in the Signal mobile app.
+3. On success, proceed to the Chat List.
 
+> **Note:** The QR code device-linking mechanism depends on how `libsignal-protocol-c` exposes the provisioning flow — this needs investigation before implementation.
 
+---
+
+## Chat List
+
+One line per conversation, sorted most-recent-first. Unread chats are marked with `*`.
+
+**Format:**
+- 1:1: `<Full Name>: <truncated last message preview>`
+  - `Florian Heß: This is a test message that gets truncated on the right...`
+- Group (named): `<Group Name>: <truncated last message preview>`
+  - `Weekend Plans: This is the last message, which is also truncated...`
+- Group (unnamed): `<First, Names, ...>: <truncated last message preview>`
+  - `Florian, Andreas, Dominik: This is the last message, which is also truncated...`
+
+**Keys:**
+
+| Key | Action |
+|-----|--------|
+| ↑ / ↓ | Navigate chats |
+| PgUp / PgDn | Scroll list |
+| Return | Open selected chat |
+| `d` | Delete chat (confirmation required) |
+| `Q` | Quit |
+
+The list scrolls automatically when the cursor reaches the screen edge, keeping one additional entry visible above and below the selection at all times.
+
+---
+
+## Chat Window
+
+Layout (top to bottom):
+
+```
+┌─────────────────────────────────┐
+│  Florian Heß                    │  ← header: contact or group name
+├─────────────────────────────────┤
+│                                 │
+│  * Florian Heß:                 │  ← message area (scrollable)
+│    Hello people!                │
+│                                 │
+│  * Andreas Schirra:             │
+│    Hi Florian!                  │
+│                                 │
+├─────────────────────────────────┤
+│  Florian Heß is typing...       │  ← status bar
+├─────────────────────────────────┤
+│  >                              │  ← input bar
+└─────────────────────────────────┘
+```
+
+**Keys:**
+
+| Key | Action |
+|-----|--------|
+| PgUp / PgDn | Scroll message area |
+| Shift+↑ | Activate selection / move selection up (toward older messages) |
+| Shift+↓ | Move selection down (toward newer messages); no-op if no selection |
+| Escape | Clear selection (first press); return to Chat List (second press) |
+
+---
+
+### Message Area
+
+Oldest messages at the top, newest at the bottom. Consecutive messages from the same sender are grouped under one header.
+
+```
+* Florian Heß:
+  Hello people!
+* Andreas Schirra:
+  Hi Florian!
+* Stefan Hagen:
+  Messages can be long and
+  contain line breaks
+* Stefan Hagen:
+  Messages with reactions have them appended inline. [1x❤, 3x👋]
+* Stefan Hagen:
+  > Florian Heß:
+  > Hello people!
+  Replies quote the original with a > prefix.
+* Andreas Schirra:
+  > Stefan Hagen:
+  > Replies will quote the original message
+  Nested replies do NOT include the grandparent quote — one level only.
+```
+
+Own messages use the same format; the username is colored to distinguish it.
+
+Sent messages show a read receipt indicator:
+- `✓` — delivered
+- `✓✓` — seen
+
+**Timestamps** appear as inline separators when the gap between consecutive messages exceeds one hour:
+
+```
+── 2026-06-26 09:00 ──
+* Florian Heß:
+  Good morning!
+── 2026-06-26 14:35 ──
+* Stefan Hagen:
+  Afternoon everyone
+```
+
+**Unread boundary** is marked with a separator at the first unread message:
+
+```
+── new ──
+* Florian Heß:
+  You missed this
+```
+
+**Message selection** (Shift+↑/↓) scrolls automatically when the cursor reaches the screen edge, keeping one additional message visible above and below the selection. ESC clears the selection entirely; the next Shift+↑ starts fresh at the most recent message.
+
+When a message is selected, the status bar shows full message metadata (sender, timestamp, delivery status) instead of the typing notification.
+
+---
+
+### Status Bar
+
+Normally shows typing notifications:
+
+| Scenario | Text |
+|----------|------|
+| One person | `Florian Heß is typing…` |
+| Two people | `Florian and Andreas are typing…` |
+| Three or more | `Florian, Andreas, and 3 more are typing…` |
+
+Temporarily overridden by:
+- Autocomplete candidates (double-Tab on `@mention` or `/command`)
+- Message metadata when a message is selected
+
+Restores to its normal content when the next character is typed or Backspace is pressed.
+
+---
+
+### Input Bar
+
+Always focused. Grows vertically as needed (no line cap).
+
+| Input | Action |
+|-------|--------|
+| Return | Send message |
+| Shift+Return | Insert newline |
+| Escape | Clear selection / return to Chat List |
+| `@<partial>` Tab | Complete username (unique match; excludes self) |
+| `@<partial>` Tab Tab | Show all matches on status bar |
+| Shift+↑ | Activate message selection at most recent message |
+
+In a 1:1 chat, `@`Tab always completes the other participant.
+
+---
+
+### Slash Commands (requires message selection)
+
+| Command | Action |
+|---------|--------|
+| `/reply <text>` | Send `<text>` as a reply to the selected message |
+| `/react <emoji-key>` | React to the selected message |
+| `/react` | Show existing reactions on the selected message |
+
+Autocomplete follows the same Tab logic as `@mentions` — single Tab completes on a unique match, double Tab lists all candidates on the status bar.
+
+**Supported reaction keys:**
+
+| Key | Emoji |
+|-----|-------|
+| `heart` | ❤️ |
+| `thumbs-up` | 👍 |
+| `wave` | 👋 |
+| `laugh` | 😄 |
+
+---
+
+## Open Questions
+
+- **Read receipts:** Need to verify what `libsignal-protocol-c` exposes and at what granularity.
+- **QR device linking:** Investigate how `libsignal-protocol-c` handles the provisioning flow.
+- **Chat list unread:** Visual treatment beyond `*` prefix (bold? color?).
