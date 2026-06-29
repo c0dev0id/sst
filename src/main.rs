@@ -13,6 +13,11 @@ use presage_store_sqlite::SqliteStore;
 use std::path::PathBuf;
 use tracing::error;
 
+// OpenBSD default stack limit is 4MB which is insufficient for the PQ ratchet
+// crypto stack frames inside LocalSet (futures run on the calling thread).
+// Spawn the runtime on a thread with a generous stack instead.
+const STACK_SIZE: usize = 64 * 1024 * 1024;
+
 #[derive(Parser)]
 #[clap(about = "Signal TUI client")]
 struct Args {
@@ -26,8 +31,23 @@ struct Args {
     db: Option<PathBuf>,
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime")
+                .block_on(async_main(args))
+        })?
+        .join()
+        .expect("main thread panicked")
+}
+
+async fn async_main(args: Args) -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::metadata::LevelFilter::WARN.into())
         .from_env_lossy()
@@ -36,8 +56,6 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .init();
-
-    let args = Args::parse();
 
     let db_path = args.db.unwrap_or_else(|| {
         ProjectDirs::from("", "", "simple-signal-tui")
