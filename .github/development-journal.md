@@ -37,6 +37,18 @@ Whisperfish (a production SailfishOS Signal client with active users) is built o
 
 Standard choice for Rust TUI applications. Crossterm backend works on OpenBSD (ANSI/termios). Provides the widget primitives needed: scrollable lists, text areas, layout constraints for the header/message area/status bar/input bar split.
 
+### OpenBSD SQLite workaround
+
+The bundled SQLCipher build in `presage-store-sqlite` uses OpenSSL 3.x `EVP_MAC` APIs not present in OpenBSD's LibreSSL. Fix: `LIBSQLITE3_SYS_USE_PKG_CONFIG=1` in `.cargo/config.toml` + `default-features = false` on `presage-store-sqlite` to skip the bundled build and link against the system sqlite3 (3.53.2 at `/usr/local/lib/libsqlite3.so`). No cipher support, but we pass `None` as passphrase so this is fine.
+
+### No threads() API in presage store
+
+The presage store has no `threads()` listing method. The chat list is assembled manually: `contacts()` yields `Contact { uuid, name, phone_number, ... }`, `groups()` yields `(GroupMasterKeyBytes, Group { title, ... })`. For each, call `messages(thread, ..)` (returns DESC by timestamp) and take the first item as the last-message preview. Sort all entries by that timestamp.
+
+### ContentExt trait for message timestamps
+
+`Content::timestamp()` is not a method on the struct itself — it's provided by the `presage::store::ContentExt` trait. Must be imported explicitly.
+
 ## Core Features
 
 See `README.md` for the full UX specification. High-level:

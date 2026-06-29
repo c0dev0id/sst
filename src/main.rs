@@ -1,3 +1,5 @@
+mod signal;
+
 use anyhow::Context as _;
 use clap::Parser;
 use directories::ProjectDirs;
@@ -16,6 +18,9 @@ use tracing::error;
 struct Args {
     #[clap(long, help = "Re-link this device even if already registered")]
     relink: bool,
+
+    #[clap(long, help = "Sync messages and print chat list, then exit")]
+    list: bool,
 
     #[clap(long, help = "Path to the SQLite database (default: XDG data dir)")]
     db: Option<PathBuf>,
@@ -52,26 +57,35 @@ async fn main() -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.relink, store)).await
+    local.run_until(run(args.relink, args.list, store)).await
 }
 
-async fn run<S: Store>(relink: bool, store: S) -> anyhow::Result<()> {
-    let manager = if relink {
+async fn run<S: Store>(relink: bool, list: bool, store: S) -> anyhow::Result<()> {
+    let mut manager = if relink {
         link_device(store).await?
     } else {
-        match Manager::load_registered(store).await {
-            Ok(m) => m,
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "No existing registration found. Run with --relink to link this device."
-                ));
-            }
-        }
+        Manager::load_registered(store).await.map_err(|_| {
+            anyhow::anyhow!(
+                "No existing registration found. Run with --relink to link this device."
+            )
+        })?
     };
 
+    if list {
+        signal::sync(&mut manager).await?;
+        let threads = signal::list_threads(&manager).await?;
+        println!("--- {} chat(s) ---", threads.len());
+        for entry in &threads {
+            let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
+            println!("{}: {}", entry.name, preview);
+        }
+        return Ok(());
+    }
+
+    // Phase 3+: launch TUI
     let whoami = manager.whoami().await?;
     println!("Linked as: {whoami:?}");
-    println!("Auth OK — ready.");
+    println!("(TUI not yet implemented — use --list to test data layer)");
 
     Ok(())
 }
