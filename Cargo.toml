@@ -13,9 +13,11 @@ presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "
 
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
 directories = "6.0"
 futures = "0.3"
 qr2term = "0.3"
+ratatui = "0.29"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

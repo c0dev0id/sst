@@ -1,4 +1,6 @@
+mod app;
 mod signal;
+mod ui;
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -89,9 +91,10 @@ async fn run<S: Store>(relink: bool, list: bool, store: S) -> anyhow::Result<()>
         })?
     };
 
+    signal::sync(&mut manager).await?;
+    let threads = signal::list_threads(&manager).await?;
+
     if list {
-        signal::sync(&mut manager).await?;
-        let threads = signal::list_threads(&manager).await?;
         println!("--- {} chat(s) ---", threads.len());
         for entry in &threads {
             let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
@@ -100,12 +103,7 @@ async fn run<S: Store>(relink: bool, list: bool, store: S) -> anyhow::Result<()>
         return Ok(());
     }
 
-    // Phase 3+: launch TUI
-    let whoami = manager.whoami().await?;
-    println!("Linked as: {whoami:?}");
-    println!("(TUI not yet implemented — use --list to test data layer)");
-
-    Ok(())
+    app::run(threads).await
 }
 
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {
