@@ -197,10 +197,23 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             lines.push(if is_selected { q_line.style(highlight) } else { q_line });
         }
 
-        // Message body — indent each line, highlight if selected
+        // Message body — indent each line, highlight if selected.
+        // Append ✓/✓✓ receipt indicator on the last line of own messages.
         let body = signal::message_body(content);
-        for text_line in body.lines() {
-            let line = Line::raw(format!("  {}", text_line));
+        let body_lines: Vec<&str> = body.lines().collect();
+        let receipt = if is_own {
+            receipt_indicator(&chat.read, &chat.delivered, ts)
+        } else {
+            ""
+        };
+        for (i, text_line) in body_lines.iter().enumerate() {
+            let is_last = i + 1 == body_lines.len();
+            let text = if is_last && !receipt.is_empty() {
+                format!("  {}{}", text_line, receipt)
+            } else {
+                format!("  {}", text_line)
+            };
+            let line = Line::raw(text);
             lines.push(if is_selected { line.style(highlight) } else { line });
         }
 
@@ -325,6 +338,12 @@ fn draw_status_bar(f: &mut Frame, area: Rect, text: &str) {
     let bar = Paragraph::new(text)
         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
     f.render_widget(bar, area);
+}
+
+fn receipt_indicator(read: &std::collections::HashSet<u64>, delivered: &std::collections::HashSet<u64>, ts: u64) -> &'static str {
+    if read.contains(&ts) { "  ✓✓" }
+    else if delivered.contains(&ts) { "  ✓" }
+    else { "" }
 }
 
 fn fmt_ts_short(ts_ms: u64) -> String {

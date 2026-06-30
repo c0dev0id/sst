@@ -10,7 +10,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
-use presage::libsignal_service::proto::{DataMessage, GroupContextV2, SyncMessage, data_message, sync_message::Sent};
+use presage::libsignal_service::proto::{DataMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
 
 pub struct ThreadEntry {
     pub thread: Thread,
@@ -365,6 +365,68 @@ pub fn message_quote(content: &Content) -> Option<(Uuid, String)> {
     };
     let text = quote.text.clone().unwrap_or_default();
     Some((author, text))
+}
+
+/// Returns (delivered_timestamps, read_timestamps) for our sent messages in this thread.
+/// Scans stored ReceiptMessage entries; read implies delivered.
+pub async fn load_receipt_state<S: Store>(
+    manager: &Manager<S, Registered>,
+    thread: &Thread,
+) -> anyhow::Result<(HashSet<u64>, HashSet<u64>)> {
+    let iter = manager
+        .store()
+        .messages(thread, ..)
+        .await
+        .context("failed to load messages for receipt state")?;
+
+    let mut delivered: HashSet<u64> = HashSet::new();
+    let mut read: HashSet<u64> = HashSet::new();
+
+    for result in iter {
+        let Ok(content) = result else { continue };
+        if let ContentBody::ReceiptMessage(receipt) = &content.body {
+            let kind = receipt.r#type.and_then(|t| receipt_message::Type::try_from(t).ok());
+            match kind {
+                Some(receipt_message::Type::Delivery) => {
+                    delivered.extend(receipt.timestamp.iter().copied());
+                }
+                Some(receipt_message::Type::Read) => {
+                    // Read implies delivered
+                    read.extend(receipt.timestamp.iter().copied());
+                    delivered.extend(receipt.timestamp.iter().copied());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok((delivered, read))
+}
+
+/// Send a READ receipt to the contact for the given message timestamps.
+/// Silently skips group threads (would need per-sender dispatch).
+pub async fn send_read_receipt<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    timestamps: Vec<u64>,
+) -> anyhow::Result<()> {
+    if timestamps.is_empty() {
+        return Ok(());
+    }
+    let service_id = match thread {
+        Thread::Contact(sid) => sid.clone(),
+        Thread::Group(_) => return Ok(()),
+    };
+    let ts = now_millis()?;
+    let receipt = ReceiptMessage {
+        r#type: Some(receipt_message::Type::Read as i32),
+        timestamp: timestamps,
+    };
+    manager
+        .send_message(service_id, receipt, ts)
+        .await
+        .context("failed to send read receipt")?;
+    Ok(())
 }
 
 fn now_millis() -> anyhow::Result<u64> {

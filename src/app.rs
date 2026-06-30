@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use presage::Manager;
@@ -25,8 +27,10 @@ pub struct ChatState {
     pub scroll: usize,
     pub viewport_height: u16,
     pub input: String,
-    pub cursor: usize,           // byte offset into `input`
+    pub cursor: usize,                   // byte offset into `input`
     pub selected_message: Option<usize>, // index into `messages`
+    pub delivered: HashSet<u64>,         // timestamps of our messages confirmed delivered
+    pub read: HashSet<u64>,              // timestamps of our messages confirmed read
 }
 
 pub enum AppCmd {
@@ -52,7 +56,14 @@ impl App {
         Self { threads, list_state, quit: false, view: View::ChatList, chat: None, own_aci }
     }
 
-    pub fn open_chat(&mut self, thread: Thread, thread_name: String, messages: Vec<Content>) {
+    pub fn open_chat(
+        &mut self,
+        thread: Thread,
+        thread_name: String,
+        messages: Vec<Content>,
+        delivered: HashSet<u64>,
+        read: HashSet<u64>,
+    ) {
         self.chat = Some(ChatState {
             thread,
             thread_name,
@@ -62,6 +73,8 @@ impl App {
             input: String::new(),
             cursor: 0,
             selected_message: None,
+            delivered,
+            read,
         });
         self.view = View::ChatWindow;
     }
@@ -324,7 +337,23 @@ async fn execute_cmd<S: Store>(
             let thread = app.threads[idx].thread.clone();
             let name = app.threads[idx].name.clone();
             let messages = signal::load_messages(manager, &thread).await?;
-            app.open_chat(thread, name, messages);
+            let (delivered, read) = signal::load_receipt_state(manager, &thread)
+                .await
+                .unwrap_or_default();
+
+            // Collect timestamps of incoming messages to acknowledge as read.
+            let own_aci = app.own_aci;
+            let to_ack: Vec<u64> = messages
+                .iter()
+                .filter(|m| own_aci.map(|a| a != m.metadata.sender.raw_uuid()).unwrap_or(true))
+                .map(|m| m.timestamp())
+                .collect();
+
+            app.open_chat(thread.clone(), name, messages, delivered, read);
+
+            if let Err(e) = signal::send_read_receipt(manager, &thread, to_ack).await {
+                tracing::warn!("send_read_receipt: {e}");
+            }
         }
         AppCmd::SendMessage => {
             // Capture everything we need before mutably borrowing the manager.
@@ -407,13 +436,17 @@ pub async fn run<S: Store>(
                 event = next_signal(&mut rx) => {
                     if let Some(received) = event {
                         app.on_signal(received);
-                        // Reload chat messages from the store on any incoming event
-                        // so new messages (including our own echoed sends) appear immediately.
+                        // Reload chat messages and receipt state on any incoming event.
                         if matches!(app.view, View::ChatWindow) {
                             if let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone()) {
                                 if let Ok(msgs) = signal::load_messages(&manager, &thread).await {
+                                    let receipt_state = signal::load_receipt_state(&manager, &thread).await.ok();
                                     if let Some(chat) = &mut app.chat {
                                         chat.messages = msgs;
+                                        if let Some((del, rd)) = receipt_state {
+                                            chat.delivered = del;
+                                            chat.read = rd;
+                                        }
                                     }
                                 }
                             }
