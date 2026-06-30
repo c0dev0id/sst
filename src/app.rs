@@ -235,6 +235,14 @@ async fn execute_cmd<S: Store>(
             let trimmed = text.trim().to_string();
             if !trimmed.is_empty() {
                 signal::send_to_thread(manager, &thread, trimmed).await?;
+                // Reload immediately — presage writes the sent message to the local
+                // store before returning, so it's available here without waiting for
+                // the SyncMessage echo (which may arrive on a dying stream).
+                if let Ok(msgs) = signal::load_messages(manager, &thread).await {
+                    if let Some(chat) = &mut app.chat {
+                        chat.messages = msgs;
+                    }
+                }
             }
         }
     }
