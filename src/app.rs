@@ -277,6 +277,17 @@ pub async fn run<S: Store>(
                 event = next_signal(&mut rx) => {
                     if let Some(received) = event {
                         app.on_signal(received);
+                        // Reload chat messages from the store on any incoming event
+                        // so new messages (including our own echoed sends) appear immediately.
+                        if matches!(app.view, View::ChatWindow) {
+                            if let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone()) {
+                                if let Ok(msgs) = signal::load_messages(&manager, &thread).await {
+                                    if let Some(chat) = &mut app.chat {
+                                        chat.messages = msgs;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
