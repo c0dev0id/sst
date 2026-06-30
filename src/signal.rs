@@ -138,9 +138,16 @@ pub async fn connect<S: Store>(
 
 pub fn extract_update(content: &Content) -> Option<MessageUpdate> {
     let thread = Thread::try_from(content).ok()?;
+    let preview = extract_preview(content);
+    // Receipts, typing messages, and other no-body events have no preview.
+    // Returning None here keeps the thread's last_preview and last_ts intact
+    // so they can't clear a visible preview or push the thread to the top.
+    if preview.is_none() {
+        return None;
+    }
     Some(MessageUpdate {
         thread,
-        preview: extract_preview(content),
+        preview,
         ts: content.timestamp(),
     })
 }
