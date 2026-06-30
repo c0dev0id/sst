@@ -23,8 +23,8 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             let prefix = if t.unread { "* " } else { "  " };
             let text = match t.last_preview.as_deref() {
                 Some(p) if !p.is_empty() => {
-                    let first_line = p.lines().next().unwrap_or(p);
-                    format!("{}{}: {}", prefix, t.name, first_line)
+                    let collapsed = p.lines().collect::<Vec<_>>().join(" ");
+                    format!("{}{}: {}", prefix, t.name, collapsed)
                 }
                 _ => format!("{}{}", prefix, t.name),
             };
