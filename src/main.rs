@@ -5,6 +5,7 @@ use clap::Parser;
 use directories::ProjectDirs;
 use futures::{channel::oneshot, future};
 use presage::libsignal_service::configuration::SignalServers;
+use presage::libsignal_service::protocol::ServiceId;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::store::Store;
@@ -90,8 +91,10 @@ async fn run<S: Store>(relink: bool, list: bool, store: S) -> anyhow::Result<()>
     };
 
     if list {
-        signal::sync(&mut manager).await?;
-        let threads = signal::list_threads(&manager).await?;
+        let seen_threads = signal::sync(&mut manager).await?;
+        let whoami = manager.whoami().await?;
+        let own_aci = ServiceId::Aci(whoami.aci.into());
+        let threads = signal::list_threads(&manager, &own_aci, seen_threads).await?;
         println!("--- {} chat(s) ---", threads.len());
         for entry in &threads {
             let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
