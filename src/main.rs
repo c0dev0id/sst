@@ -5,7 +5,7 @@ mod ui;
 use anyhow::Context as _;
 use clap::Parser;
 use directories::ProjectDirs;
-use futures::{channel::oneshot, future};
+use futures::{StreamExt, channel::oneshot, future};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
@@ -104,10 +104,10 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
     };
 
     let state = signal::SyncState { data_dir };
-    signal::sync(&mut manager, &state).await?;
-    let threads = signal::list_threads(&manager, &state).await?;
 
     if list {
+        signal::sync(&mut manager, &state).await?;
+        let threads = signal::list_threads(&manager, &state).await?;
         println!("--- {} chat(s) ---", threads.len());
         for entry in &threads {
             let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
@@ -116,7 +116,20 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
         return Ok(());
     }
 
-    app::run(threads).await
+    let stream = signal::connect(&mut manager, &state).await?;
+    let threads = signal::list_threads(&manager, &state).await?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::task::spawn_local(async move {
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            if tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    app::run(threads, rx).await
 }
 
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {

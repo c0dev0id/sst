@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::pin::Pin;
 
 use anyhow::Context as _;
-use futures::StreamExt;
-use futures::pin_mut;
+use futures::{Stream, StreamExt};
 use presage::Manager;
 use presage::manager::Registered;
 use presage::model::messages::Received;
@@ -17,6 +17,12 @@ pub struct ThreadEntry {
     pub name: String,
     pub last_preview: Option<String>,
     pub last_ts: u64,
+}
+
+pub struct MessageUpdate {
+    pub thread: Thread,
+    pub preview: Option<String>,
+    pub ts: u64,
 }
 
 pub struct SyncState {
@@ -33,20 +39,12 @@ impl SyncState {
     }
 }
 
-/// Drain the message queue, persist discovered threads, and refresh group metadata.
-pub async fn sync<S: Store>(
+async fn drain_backlog<S: Store>(
+    stream: &mut (impl Stream<Item = Received> + Unpin),
     manager: &mut Manager<S, Registered>,
     state: &SyncState,
 ) -> anyhow::Result<()> {
-    eprintln!("Syncing...");
-
     let own_aci = manager.whoami().await?.aci;
-
-    let stream = manager
-        .receive_messages()
-        .await
-        .context("failed to start receive stream")?;
-    pin_mut!(stream);
 
     let mut count = 0usize;
     let mut seen_group_keys: HashSet<[u8; 32]> = HashSet::new();
@@ -55,7 +53,7 @@ pub async fn sync<S: Store>(
     while let Some(event) = stream.next().await {
         match event {
             Received::QueueEmpty => {
-                eprintln!("Sync complete ({count} messages received).");
+                eprintln!("Sync complete ({count} messages).");
                 break;
             }
             Received::Content(content) => {
@@ -77,7 +75,6 @@ pub async fn sync<S: Store>(
         }
     }
 
-    // Persist and refresh group metadata.
     let mut known_groups = load_group_keys(&state.groups_path());
     known_groups.extend(seen_group_keys);
     let _ = save_group_keys(&state.groups_path(), &known_groups);
@@ -96,18 +93,53 @@ pub async fn sync<S: Store>(
         }
     }
 
-    // Persist newly discovered contact UUIDs.
     let mut known_contacts = load_contact_uuids(&state.contacts_path());
     known_contacts.extend(seen_contact_uuids);
     let _ = save_contact_uuids(&state.contacts_path(), &known_contacts);
 
-    // Ask the primary device to push its contact list.
-    // The response arrives as Received::Contacts on the next sync.
     if let Err(e) = manager.request_contacts().await {
         eprintln!("Warning: could not request contact sync: {e}");
     }
 
     Ok(())
+}
+
+/// Drain the message queue and drop the stream. Used for --list mode.
+pub async fn sync<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    state: &SyncState,
+) -> anyhow::Result<()> {
+    let mut stream = Box::pin(
+        manager
+            .receive_messages()
+            .await
+            .context("failed to start receive stream")?,
+    );
+    drain_backlog(&mut stream, manager, state).await
+}
+
+/// Drain the message queue then return the live stream for TUI mode.
+pub async fn connect<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    state: &SyncState,
+) -> anyhow::Result<Pin<Box<dyn Stream<Item = Received>>>> {
+    let mut stream: Pin<Box<dyn Stream<Item = Received>>> = Box::pin(
+        manager
+            .receive_messages()
+            .await
+            .context("failed to start receive stream")?,
+    );
+    drain_backlog(&mut stream, manager, state).await?;
+    Ok(stream)
+}
+
+pub fn extract_update(content: &Content) -> Option<MessageUpdate> {
+    let thread = Thread::try_from(content).ok()?;
+    Some(MessageUpdate {
+        thread,
+        preview: extract_preview(content),
+        ts: content.timestamp(),
+    })
 }
 
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
@@ -119,7 +151,6 @@ pub async fn list_threads<S: Store>(
     let mut entries: Vec<ThreadEntry> = Vec::new();
     let mut seen: HashSet<Uuid> = HashSet::new();
 
-    // Contacts from the contacts table (have names).
     for result in manager.store().contacts().await? {
         let contact = result?;
         seen.insert(contact.uuid);
@@ -132,7 +163,6 @@ pub async fn list_threads<S: Store>(
         }
     }
 
-    // Contacts discovered via message sync but absent from the contacts table.
     for uuid_bytes in load_contact_uuids(&state.contacts_path()) {
         let uuid = Uuid::from_bytes(uuid_bytes);
         if seen.contains(&uuid) {
@@ -151,7 +181,6 @@ pub async fn list_threads<S: Store>(
         }
     }
 
-    // Groups with fetched metadata.
     for result in manager.store().groups().await? {
         let (master_key, group) = result?;
         let thread = Thread::Group(master_key);
