@@ -101,6 +101,12 @@ pub async fn sync<S: Store>(
     known_contacts.extend(seen_contact_uuids);
     let _ = save_contact_uuids(&state.contacts_path(), &known_contacts);
 
+    // Ask the primary device to push its contact list.
+    // The response arrives as Received::Contacts on the next sync.
+    if let Err(e) = manager.request_contacts().await {
+        eprintln!("Warning: could not request contact sync: {e}");
+    }
+
     Ok(())
 }
 
