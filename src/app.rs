@@ -25,7 +25,8 @@ pub struct ChatState {
     pub scroll: usize,
     pub viewport_height: u16,
     pub input: String,
-    pub cursor: usize, // byte offset into `input`
+    pub cursor: usize,           // byte offset into `input`
+    pub selected_message: Option<usize>, // index into `messages`
 }
 
 pub enum AppCmd {
@@ -60,6 +61,7 @@ impl App {
             viewport_height: 0,
             input: String::new(),
             cursor: 0,
+            selected_message: None,
         });
         self.view = View::ChatWindow;
     }
@@ -118,11 +120,42 @@ impl App {
     }
 
     fn on_key_chat(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
-        let chat = self.chat.as_mut()?;
-        match key.code {
-            KeyCode::Esc => {
+        // Esc is handled before borrowing `chat` because its two branches
+        // either mutate chat.selected_message OR set self.chat = None — the
+        // borrow checker can't elide a `chat` borrow that's used in one branch
+        // while `self.chat = None` fires in the other.
+        if key.code == KeyCode::Esc {
+            let has_selection = self.chat.as_ref().map(|c| c.selected_message.is_some()).unwrap_or(false);
+            if has_selection {
+                if let Some(chat) = &mut self.chat {
+                    chat.selected_message = None;
+                }
+            } else {
                 self.view = View::ChatList;
                 self.chat = None;
+            }
+            return None;
+        }
+
+        let chat = self.chat.as_mut()?;
+        match key.code {
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if !chat.messages.is_empty() {
+                    chat.selected_message = Some(
+                        chat.selected_message
+                            .map(|s| s.saturating_sub(1))
+                            .unwrap_or(chat.messages.len() - 1),
+                    );
+                }
+                None
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if let Some(sel) = chat.selected_message {
+                    let max = chat.messages.len().saturating_sub(1);
+                    if sel < max {
+                        chat.selected_message = Some(sel + 1);
+                    }
+                }
                 None
             }
             KeyCode::Left => {

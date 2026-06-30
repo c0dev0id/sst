@@ -82,7 +82,9 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
 
     draw_chat_header(f, app, chunks[0]);
     draw_messages(f, app, chunks[1]);
-    draw_status_bar(f, chunks[2], "  ←→↑↓ cursor   PgUp/PgDn scroll   Esc back   Enter send   Shift+Enter newline");
+
+    let status = chat_status_bar(app);
+    draw_status_bar(f, chunks[2], &status);
     draw_input(f, app, chunks[3]);
 }
 
@@ -111,15 +113,24 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     let own_aci = app.own_aci;
     let is_group = matches!(chat.thread, presage::store::Thread::Group(_));
     let thread_name = chat.thread_name.clone();
+    let selected = chat.selected_message;
+    let highlight = Style::default().bg(Color::Blue).fg(Color::White);
 
     let mut lines: Vec<Line> = Vec::new();
     let mut prev_ts: Option<u64> = None;
     let mut prev_sender_id: Option<String> = None;
 
-    for content in &chat.messages {
+    // Per-message line ranges for selection highlight and auto-scroll.
+    // visual_start: first line in the message's visual region (incl. separator).
+    // body_end: last body line added for the message.
+    let mut msg_visual_starts: Vec<usize> = Vec::with_capacity(chat.messages.len());
+    let mut msg_body_ends: Vec<usize> = Vec::with_capacity(chat.messages.len());
+
+    for (msg_idx, content) in chat.messages.iter().enumerate() {
         let ts = content.timestamp();
         let sender_uuid = content.metadata.sender.raw_uuid();
         let is_own = own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+        let is_selected = selected == Some(msg_idx);
 
         let sender_label = if is_own {
             "You".to_string()
@@ -128,6 +139,9 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             thread_name.clone()
         };
+
+        // Record where this message's visual region begins (before separator).
+        msg_visual_starts.push(lines.len());
 
         // Timestamp separator when gap > 1 hour
         if let Some(prev) = prev_ts {
@@ -155,21 +169,25 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             };
-            lines.push(Line::from(vec![
+            let header = Line::from(vec![
                 Span::styled(sender_label.clone(), sender_style),
                 Span::styled(
                     format!("  {}", fmt_ts_short(ts)),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]));
+            ]);
+            lines.push(if is_selected { header.style(highlight) } else { header });
             prev_sender_id = Some(sender_key);
         }
 
-        // Message body — indent each line
+        // Message body — indent each line, highlight if selected
         let body = signal::message_body(content);
         for text_line in body.lines() {
-            lines.push(Line::from(format!("  {}", text_line)));
+            let line = Line::raw(format!("  {}", text_line));
+            lines.push(if is_selected { line.style(highlight) } else { line });
         }
+
+        msg_body_ends.push(lines.len().saturating_sub(1));
     }
 
     let total = lines.len();
@@ -181,11 +199,28 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         chat.scroll = max_scroll;
     }
 
-    let scroll_row = total.saturating_sub(height).saturating_sub(chat.scroll) as u16;
+    // Auto-scroll to keep the selected message in view with 1-line context.
+    // scroll_row is the first visible line; higher chat.scroll = more scrolled up.
+    if let Some(sel_idx) = selected {
+        if let (Some(&vis_start), Some(&body_end)) =
+            (msg_visual_starts.get(sel_idx), msg_body_ends.get(sel_idx))
+        {
+            let scroll_row = max_scroll.saturating_sub(chat.scroll);
+            if vis_start < scroll_row.saturating_add(1) {
+                // Selected region is above viewport — scroll up.
+                let target_row = vis_start.saturating_sub(1);
+                chat.scroll = max_scroll.saturating_sub(target_row);
+            } else if body_end + 1 >= scroll_row + height {
+                // Selected body end is below viewport — scroll down.
+                let target_row = (body_end + 2).saturating_sub(height);
+                chat.scroll = max_scroll.saturating_sub(target_row);
+            }
+            chat.scroll = chat.scroll.min(max_scroll);
+        }
+    }
 
-    let text = Text::from(lines);
-    let paragraph = Paragraph::new(text).scroll((scroll_row, 0));
-    f.render_widget(paragraph, area);
+    let scroll_row = total.saturating_sub(height).saturating_sub(chat.scroll) as u16;
+    f.render_widget(Paragraph::new(Text::from(lines)).scroll((scroll_row, 0)), area);
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
@@ -250,6 +285,24 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────
+
+fn chat_status_bar(app: &App) -> String {
+    let chat = match app.chat.as_ref() {
+        Some(c) => c,
+        None => return String::new(),
+    };
+    if let Some(sel_idx) = chat.selected_message {
+        if let Some(content) = chat.messages.get(sel_idx) {
+            let sender_uuid = content.metadata.sender.raw_uuid();
+            let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+            let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+            let ts = fmt_ts_long(content.timestamp());
+            let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
+            return format!("  [{}]  {}  ·  {}  |  Shift+↑↓ navigate   Esc deselect", pos, sender, ts);
+        }
+    }
+    "  ←→↑↓ cursor   PgUp/PgDn scroll   Shift+↑ select   Esc back   Enter send   Shift+Enter newline".to_string()
+}
 
 fn draw_status_bar(f: &mut Frame, area: Rect, text: &str) {
     let bar = Paragraph::new(text)
