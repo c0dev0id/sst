@@ -103,10 +103,10 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
         })?
     };
 
-    let state = signal::SyncState { data_dir };
+    let mut state = signal::SyncState { data_dir, own_aci: None };
 
     if list {
-        signal::sync(&mut manager, &state).await?;
+        signal::sync(&mut manager, &mut state).await?;
         let threads = signal::list_threads(&manager, &state).await?;
         println!("--- {} chat(s) ---", threads.len());
         for entry in &threads {
@@ -116,7 +116,7 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
         return Ok(());
     }
 
-    let stream = signal::connect(&mut manager, &state).await?;
+    let stream = signal::connect(&mut manager, &mut state).await?;
     let threads = signal::list_threads(&manager, &state).await?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(64);

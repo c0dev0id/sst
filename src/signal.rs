@@ -27,6 +27,7 @@ pub struct MessageUpdate {
 
 pub struct SyncState {
     pub data_dir: std::path::PathBuf,
+    pub own_aci: Option<Uuid>,
 }
 
 impl SyncState {
@@ -42,9 +43,10 @@ impl SyncState {
 async fn drain_backlog<S: Store>(
     stream: &mut (impl Stream<Item = Received> + Unpin),
     manager: &mut Manager<S, Registered>,
-    state: &SyncState,
+    state: &mut SyncState,
 ) -> anyhow::Result<()> {
     let own_aci = manager.whoami().await?.aci;
+    state.own_aci = Some(own_aci);
 
     let mut count = 0usize;
     let mut seen_group_keys: HashSet<[u8; 32]> = HashSet::new();
@@ -107,7 +109,7 @@ async fn drain_backlog<S: Store>(
 /// Drain the message queue and drop the stream. Used for --list mode.
 pub async fn sync<S: Store>(
     manager: &mut Manager<S, Registered>,
-    state: &SyncState,
+    state: &mut SyncState,
 ) -> anyhow::Result<()> {
     let mut stream = Box::pin(
         manager
@@ -121,7 +123,7 @@ pub async fn sync<S: Store>(
 /// Drain the message queue then return the live stream for TUI mode.
 pub async fn connect<S: Store>(
     manager: &mut Manager<S, Registered>,
-    state: &SyncState,
+    state: &mut SyncState,
 ) -> anyhow::Result<Pin<Box<dyn Stream<Item = Received>>>> {
     let mut stream: Pin<Box<dyn Stream<Item = Received>>> = Box::pin(
         manager
@@ -156,7 +158,11 @@ pub async fn list_threads<S: Store>(
         seen.insert(contact.uuid);
         let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
-        let name = contact_display_name(&contact);
+        let name = if state.own_aci == Some(contact.uuid) {
+            "Note to Self".to_string()
+        } else {
+            contact_display_name(&contact)
+        };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
             entries.push(ThreadEntry { thread, name, last_preview, last_ts });
