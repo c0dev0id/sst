@@ -50,23 +50,35 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(args: Args) -> anyhow::Result<()> {
-    let filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(tracing::metadata::LevelFilter::WARN.into())
-        .from_env_lossy()
-        .add_directive("libsignal=error".parse().unwrap());
-    tracing_subscriber::fmt::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
-        .init();
-
     let db_path = args.db.unwrap_or_else(|| {
         ProjectDirs::from("", "", "simple-signal-tui")
             .expect("could not determine data directory")
             .data_dir()
             .join("db")
     });
+    let data_dir = db_path.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&data_dir)?;
 
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::metadata::LevelFilter::WARN.into())
+        .from_env_lossy()
+        .add_directive("libsignal=error".parse().unwrap());
+
+    if args.list {
+        tracing_subscriber::fmt::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .init();
+    } else {
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join("sst.log"))?;
+        tracing_subscriber::fmt::fmt()
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_env_filter(filter)
+            .init();
+    }
 
     let store = SqliteStore::open_with_passphrase(
         db_path.to_str().context("non-UTF-8 db path")?,
@@ -77,7 +89,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.relink, args.list, store, db_path.parent().unwrap().to_path_buf())).await
+    local.run_until(run(args.relink, args.list, store, data_dir)).await
 }
 
 async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
