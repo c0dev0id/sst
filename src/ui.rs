@@ -67,7 +67,7 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
     let input_lines = app
         .chat
         .as_ref()
-        .map(|c| c.input.lines().count().max(1) as u16)
+        .map(|c| c.input.split('\n').count().max(1) as u16)
         .unwrap_or(1);
 
     let chunks = Layout::default()
@@ -82,7 +82,7 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
 
     draw_chat_header(f, app, chunks[0]);
     draw_messages(f, app, chunks[1]);
-    draw_status_bar(f, chunks[2], "  ↑↓ scroll   PgUp/PgDn   Esc back   Enter send   Shift+Enter newline");
+    draw_status_bar(f, chunks[2], "  ←→↑↓ cursor   PgUp/PgDn scroll   Esc back   Enter send   Shift+Enter newline");
     draw_input(f, app, chunks[3]);
 }
 
@@ -189,29 +189,64 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let input = app.chat.as_ref().map(|c| c.input.as_str()).unwrap_or("");
+    let (input, cursor) = app
+        .chat
+        .as_ref()
+        .map(|c| (c.input.as_str(), c.cursor))
+        .unwrap_or(("", 0));
+
     let block = Block::default()
         .borders(ratatui::widgets::Borders::TOP)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut text_lines: Vec<Line> = Vec::new();
+    // split('\n') preserves trailing newlines as an empty final element,
+    // unlike str::lines() which silently drops them.
     let display_lines: Vec<&str> = if input.is_empty() {
         vec![""]
     } else {
-        input.lines().collect()
+        input.split('\n').collect()
     };
-    for (i, line) in display_lines.iter().enumerate() {
+
+    // Cursor visual position: which line and char column.
+    let before_cursor = &input[..cursor.min(input.len())];
+    let cursor_parts: Vec<&str> = before_cursor.split('\n').collect();
+    let cursor_line = cursor_parts.len().saturating_sub(1);
+    let cursor_col = cursor_parts.last().map(|l| l.chars().count()).unwrap_or(0);
+
+    let mut text_lines: Vec<Line> = Vec::new();
+    for (i, line_text) in display_lines.iter().enumerate() {
         let prefix = if i == 0 {
             Span::styled("> ", Style::default().fg(Color::DarkGray))
         } else {
             Span::styled("  ", Style::default())
         };
-        text_lines.push(Line::from(vec![prefix, Span::raw(*line)]));
+
+        if i == cursor_line {
+            let chars: Vec<char> = line_text.chars().collect();
+            let before: String = chars[..cursor_col.min(chars.len())].iter().collect();
+            let cursor_char = if cursor_col < chars.len() {
+                chars[cursor_col].to_string()
+            } else {
+                " ".to_string() // block at end of line / empty line
+            };
+            let after: String = chars[cursor_col.saturating_add(1).min(chars.len())..].iter().collect();
+            let mut spans = vec![
+                prefix,
+                Span::raw(before),
+                Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+            ];
+            if !after.is_empty() {
+                spans.push(Span::raw(after));
+            }
+            text_lines.push(Line::from(spans));
+        } else {
+            text_lines.push(Line::from(vec![prefix, Span::raw(*line_text)]));
+        }
     }
-    let paragraph = Paragraph::new(Text::from(text_lines));
-    f.render_widget(paragraph, inner);
+
+    f.render_widget(Paragraph::new(Text::from(text_lines)), inner);
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────

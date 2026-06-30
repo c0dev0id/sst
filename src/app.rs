@@ -25,6 +25,7 @@ pub struct ChatState {
     pub scroll: usize,
     pub viewport_height: u16,
     pub input: String,
+    pub cursor: usize, // byte offset into `input`
 }
 
 pub enum AppCmd {
@@ -58,6 +59,7 @@ impl App {
             scroll: 0,
             viewport_height: 0,
             input: String::new(),
+            cursor: 0,
         });
         self.view = View::ChatWindow;
     }
@@ -123,16 +125,20 @@ impl App {
                 self.chat = None;
                 None
             }
+            KeyCode::Left => {
+                chat.cursor = cursor_left(&chat.input, chat.cursor);
+                None
+            }
+            KeyCode::Right => {
+                chat.cursor = cursor_right(&chat.input, chat.cursor);
+                None
+            }
             KeyCode::Up => {
-                if let Some(chat) = &mut self.chat {
-                    chat.scroll = chat.scroll.saturating_add(3);
-                }
+                chat.cursor = cursor_up(&chat.input, chat.cursor);
                 None
             }
             KeyCode::Down => {
-                if let Some(chat) = &mut self.chat {
-                    chat.scroll = chat.scroll.saturating_sub(3);
-                }
+                chat.cursor = cursor_down(&chat.input, chat.cursor);
                 None
             }
             KeyCode::PageUp => {
@@ -146,7 +152,8 @@ impl App {
                 None
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                chat.input.push('\n');
+                chat.input.insert(chat.cursor, '\n');
+                chat.cursor += 1;
                 None
             }
             KeyCode::Enter => {
@@ -157,12 +164,16 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                // pop last unicode scalar
-                chat.input.pop();
+                if chat.cursor > 0 {
+                    let new_cursor = cursor_left(&chat.input, chat.cursor);
+                    chat.input.remove(new_cursor);
+                    chat.cursor = new_cursor;
+                }
                 None
             }
             KeyCode::Char(c) => {
-                chat.input.push(c);
+                chat.input.insert(chat.cursor, c);
+                chat.cursor += c.len_utf8();
                 None
             }
             _ => None,
@@ -202,6 +213,61 @@ impl App {
     }
 }
 
+// ── Cursor movement helpers ───────────────────────────────────────────────────
+
+fn cursor_left(input: &str, cursor: usize) -> usize {
+    if cursor == 0 { return 0; }
+    input[..cursor].char_indices().next_back().map(|(i, _)| i).unwrap_or(0)
+}
+
+fn cursor_right(input: &str, cursor: usize) -> usize {
+    if cursor >= input.len() { return input.len(); }
+    cursor + input[cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(0)
+}
+
+// Returns (line_index, visual_col) for a byte cursor position.
+fn cursor_line_col(input: &str, cursor: usize) -> (usize, usize) {
+    let before = &input[..cursor.min(input.len())];
+    let parts: Vec<&str> = before.split('\n').collect();
+    let line = parts.len().saturating_sub(1);
+    let col = parts.last().map(|l| l.chars().count()).unwrap_or(0);
+    (line, col)
+}
+
+// Returns the byte start of a given line index.
+fn line_byte_start(input: &str, line_idx: usize) -> usize {
+    input.split('\n').take(line_idx).map(|l| l.len() + 1).sum()
+}
+
+fn cursor_up(input: &str, cursor: usize) -> usize {
+    let (line, col) = cursor_line_col(input, cursor);
+    if line == 0 { return cursor; }
+    let prev_line = input.split('\n').nth(line - 1).unwrap_or("");
+    let col_clamped = col.min(prev_line.chars().count());
+    let byte_in_line = prev_line
+        .char_indices()
+        .nth(col_clamped)
+        .map(|(b, _)| b)
+        .unwrap_or(prev_line.len());
+    line_byte_start(input, line - 1) + byte_in_line
+}
+
+fn cursor_down(input: &str, cursor: usize) -> usize {
+    let (line, col) = cursor_line_col(input, cursor);
+    let lines: Vec<&str> = input.split('\n').collect();
+    if line + 1 >= lines.len() { return cursor; }
+    let next_line = lines[line + 1];
+    let col_clamped = col.min(next_line.chars().count());
+    let byte_in_line = next_line
+        .char_indices()
+        .nth(col_clamped)
+        .map(|(b, _)| b)
+        .unwrap_or(next_line.len());
+    line_byte_start(input, line + 1) + byte_in_line
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async fn next_signal(rx: &mut Option<mpsc::Receiver<Received>>) -> Option<Received> {
     match rx {
         Some(r) => {
@@ -230,6 +296,7 @@ async fn execute_cmd<S: Store>(
         AppCmd::SendMessage => {
             let (text, thread) = {
                 let chat = app.chat.as_mut().expect("SendMessage with no open chat");
+                chat.cursor = 0;
                 (std::mem::take(&mut chat.input), chat.thread.clone())
             };
             let trimmed = text.trim().to_string();
