@@ -57,6 +57,26 @@ Affected threads (e.g. Note to Self, any group with no activity after re-linking
 
 `Content::timestamp()` is not a method on the struct itself — it's provided by the `presage::store::ContentExt` trait. Must be imported explicitly.
 
+### presage stores sent messages locally before returning from send_message
+
+`Manager::send_message()` calls `save_message()` on the local store synchronously before returning (verified in `presage/src/manager/registered.rs` lines 1058–1064). This means reloading from the store immediately after `send_to_thread` returns will always include the just-sent message — no need to wait for the SyncMessage echo from the server.
+
+Practical consequence: we reload `chat.messages` from DB inside `execute_cmd` right after send. This is reliable regardless of whether the signal receive stream is alive.
+
+### Signal receive stream may close after first live event
+
+The `Stream<Item = Received>` returned by `receive_messages()` and driven in a `spawn_local` task appears to close after delivering the first post-backlog message (possibly because `send_message` opens a new WebSocket and the old receive socket is invalidated). When the stream ends, the `spawn_local` task exits, `tx` is dropped, `mpsc::Receiver::recv()` returns `None`, and `next_signal` silences itself with `std::future::pending()` forever.
+
+Workaround: don't rely on the echo stream for UI updates after send. Reload directly from the local store. Incoming messages from other people are less critical for now but would require reconnection logic to fix properly.
+
+### Cursor byte-offset representation
+
+The input cursor (`ChatState::cursor`) is stored as a byte offset into the UTF-8 `input` string — the native unit for `String::insert` and `String::remove`. Visual column (char count) is derived at render time only, by splitting the `&input[..cursor]` prefix on `'\n'` and counting chars on the last segment. This avoids keeping two representations in sync.
+
+### str::lines() drops trailing newline
+
+`str::lines()` in Rust does not yield a trailing empty element when the string ends with `\n`. Use `str::split('\n')` instead when preserving trailing newlines matters (e.g., rendering a multi-line input field after Shift+Enter).
+
 ## Core Features
 
 See `README.md` for the full UX specification. High-level:
