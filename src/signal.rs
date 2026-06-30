@@ -242,13 +242,25 @@ async fn last_message<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
 ) -> (Option<String>, u64) {
-    let Ok(mut iter) = manager.store().messages(thread, ..).await else {
+    let Ok(iter) = manager.store().messages(thread, ..).await else {
         return (None, 0);
     };
-    let Some(Ok(content)) = iter.next() else {
-        return (None, 0);
-    };
-    (extract_preview(&content), content.timestamp())
+    let mut last_ts = 0u64;
+    let mut last_preview: Option<String> = None;
+    for result in iter.take(50) {
+        let Ok(content) = result else { continue };
+        let ts = content.timestamp();
+        if last_ts == 0 {
+            last_ts = ts; // most recent message timestamp, for sort order
+        }
+        if last_preview.is_none() {
+            last_preview = extract_preview(&content);
+            if last_preview.is_some() {
+                break;
+            }
+        }
+    }
+    (last_preview, last_ts)
 }
 
 fn extract_preview(content: &Content) -> Option<String> {
@@ -258,6 +270,7 @@ fn extract_preview(content: &Content) -> Option<String> {
             sent: Some(Sent { message: Some(msg), .. }),
             ..
         }) => preview_data_message(msg),
+        ContentBody::CallMessage(_) => Some("Call".to_string()),
         _ => None,
     }
 }
