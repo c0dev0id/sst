@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Phase 4: input bar grows vertically with multi-line content; own messages in cyan, contact/group messages in yellow
 - Input bar cursor: inverted-block character at the insert point; ←→↑↓ move the cursor within the text, including across lines
 - Message selection: Shift+↑ activates selection at the most recent message and moves toward older; Shift+↓ moves toward newer; Esc clears selection (second Esc returns to chat list). Selected message is highlighted in blue; status bar shows sender, timestamp, and position.
+- `/reply <text>` sends a Signal reply to the selected message; quoted author and first line of quoted text are rendered inline above the reply body.
 
 ### Fixed
 - WebSocket close error no longer corrupts the TUI: tracing output is redirected to `sst.log` in the data directory when running in TUI mode; `--list` mode continues writing to stderr

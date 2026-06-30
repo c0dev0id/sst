@@ -180,6 +180,23 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             prev_sender_id = Some(sender_key);
         }
 
+        // Quote block (reply preview), rendered before the body
+        if let Some((q_author_uuid, q_text)) = signal::message_quote(content) {
+            let q_author = if own_aci == Some(q_author_uuid) {
+                "You".to_string()
+            } else if is_group {
+                q_author_uuid.to_string()
+            } else {
+                thread_name.clone()
+            };
+            let q_first_line = q_text.lines().next().unwrap_or("…");
+            let q_line = Line::from(Span::styled(
+                format!("  > {}: {}", q_author, q_first_line),
+                Style::default().fg(Color::DarkGray),
+            ));
+            lines.push(if is_selected { q_line.style(highlight) } else { q_line });
+        }
+
         // Message body — indent each line, highlight if selected
         let body = signal::message_body(content);
         for text_line in body.lines() {
@@ -298,7 +315,7 @@ fn chat_status_bar(app: &App) -> String {
             let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
             let ts = fmt_ts_long(content.timestamp());
             let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
-            return format!("  [{}]  {}  ·  {}  |  Shift+↑↓ navigate   Esc deselect", pos, sender, ts);
+            return format!("  [{}]  {}  ·  {}  |  /reply <text>↵   Shift+↑↓   Esc deselect", pos, sender, ts);
         }
     }
     "  ←→↑↓ cursor   PgUp/PgDn scroll   Shift+↑ select   Esc back   Enter send   Shift+Enter newline".to_string()

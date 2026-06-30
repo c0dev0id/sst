@@ -3,7 +3,7 @@ use futures::StreamExt;
 use presage::Manager;
 use presage::manager::Registered;
 use presage::model::messages::Received;
-use presage::store::{Store, Thread};
+use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::Content;
 use presage::libsignal_service::prelude::Uuid;
 use ratatui::backend::CrosstermBackend;
@@ -327,14 +327,36 @@ async fn execute_cmd<S: Store>(
             app.open_chat(thread, name, messages);
         }
         AppCmd::SendMessage => {
-            let (text, thread) = {
+            // Capture everything we need before mutably borrowing the manager.
+            let (text, thread, quote_info) = {
                 let chat = app.chat.as_mut().expect("SendMessage with no open chat");
                 chat.cursor = 0;
-                (std::mem::take(&mut chat.input), chat.thread.clone())
+                // Snapshot quote context from the selected message before clearing it.
+                let quote_info = chat.selected_message.and_then(|idx| {
+                    let msg = chat.messages.get(idx)?;
+                    Some((
+                        msg.timestamp(),
+                        msg.metadata.sender.raw_uuid(),
+                        signal::message_body(msg),
+                    ))
+                });
+                chat.selected_message = None;
+                (std::mem::take(&mut chat.input), chat.thread.clone(), quote_info)
             };
-            let trimmed = text.trim().to_string();
+
+            let trimmed = text.trim();
             if !trimmed.is_empty() {
-                signal::send_to_thread(manager, &thread, trimmed).await?;
+                if let Some(reply_body) = trimmed.strip_prefix("/reply").map(str::trim) {
+                    if !reply_body.is_empty() {
+                        if let Some((q_ts, q_author, q_text)) = quote_info {
+                            signal::send_reply(manager, &thread, reply_body.to_string(), q_ts, q_author, q_text).await?;
+                        }
+                        // /reply with no active selection: silently drop — no orphan reply.
+                    }
+                    // /reply with no body: silently drop.
+                } else {
+                    signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
+                }
                 // Reload immediately — presage writes the sent message to the local
                 // store before returning, so it's available here without waiting for
                 // the SyncMessage echo (which may arrive on a dying stream).

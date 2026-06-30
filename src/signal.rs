@@ -10,7 +10,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
-use presage::libsignal_service::proto::{DataMessage, GroupContextV2, SyncMessage, sync_message::Sent};
+use presage::libsignal_service::proto::{DataMessage, GroupContextV2, SyncMessage, data_message, sync_message::Sent};
 
 pub struct ThreadEntry {
     pub thread: Thread,
@@ -317,15 +317,69 @@ pub async fn send_to_thread<S: Store>(
     thread: &Thread,
     text: String,
 ) -> anyhow::Result<()> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("system time error")?
-        .as_millis() as u64;
+    let ts = now_millis()?;
     let data_message = DataMessage {
         body: Some(text),
         timestamp: Some(ts),
         ..Default::default()
     };
+    dispatch_send(manager, thread, data_message, ts).await
+}
+
+pub async fn send_reply<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    text: String,
+    quote_ts: u64,
+    quote_author: Uuid,
+    quote_text: String,
+) -> anyhow::Result<()> {
+    let ts = now_millis()?;
+    let quote = data_message::Quote {
+        id: Some(quote_ts),
+        author_aci: Some(quote_author.to_string()),
+        author_aci_binary: Some(quote_author.as_bytes().to_vec()),
+        text: if quote_text.is_empty() { None } else { Some(quote_text) },
+        ..Default::default()
+    };
+    let data_message = DataMessage {
+        body: Some(text),
+        timestamp: Some(ts),
+        quote: Some(quote),
+        ..Default::default()
+    };
+    dispatch_send(manager, thread, data_message, ts).await
+}
+
+/// Returns the (author_uuid, first_line_of_text) for the quoted message, if any.
+pub fn message_quote(content: &Content) -> Option<(Uuid, String)> {
+    let quote = match &content.body {
+        ContentBody::DataMessage(msg) => msg.quote.as_ref()?,
+        _ => return None,
+    };
+    // Prefer the binary ACI field; fall back to the string form.
+    let author = if let Some(bytes) = &quote.author_aci_binary {
+        Uuid::from_slice(bytes).ok()?
+    } else {
+        Uuid::parse_str(quote.author_aci.as_deref()?).ok()?
+    };
+    let text = quote.text.clone().unwrap_or_default();
+    Some((author, text))
+}
+
+fn now_millis() -> anyhow::Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system time error")?
+        .as_millis() as u64)
+}
+
+async fn dispatch_send<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    data_message: DataMessage,
+    ts: u64,
+) -> anyhow::Result<()> {
     match thread {
         Thread::Contact(service_id) => {
             manager
