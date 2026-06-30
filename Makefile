@@ -1,15 +1,25 @@
 BINDIR = /home/sdk/.bin
-TARGET = target/debug/sst
+DEBUG_BIN   = target/debug/sst
+RELEASE_BIN = target/release/sst
 
-.PHONY: all build install clean
+.PHONY: all debug release test install install-debug clean
 
-all: build
+all: debug
 
-build:
+debug:
 	cargo build
 
-install: build
-	install -m 755 $(TARGET) $(BINDIR)/sst
+release:
+	cargo build --release
+
+test:
+	cargo test
+
+install: release
+	install -m 755 $(RELEASE_BIN) $(BINDIR)/sst
+
+install-debug: debug
+	install -m 755 $(DEBUG_BIN) $(BINDIR)/sst
 
 clean:
 	cargo clean
