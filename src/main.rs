@@ -129,7 +129,7 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
         }
     });
 
-    app::run(threads, rx).await
+    app::run(threads, state.own_aci, manager, rx).await
 }
 
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {

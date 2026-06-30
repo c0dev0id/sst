@@ -264,28 +264,81 @@ async fn last_message<S: Store>(
 }
 
 fn extract_preview(content: &Content) -> Option<String> {
+    let body = message_body(content);
+    if body.is_empty() { None } else { Some(body) }
+}
+
+pub fn message_body(content: &Content) -> String {
     match &content.body {
-        ContentBody::DataMessage(msg) => preview_data_message(msg),
+        ContentBody::DataMessage(msg) => data_message_body(msg),
         ContentBody::SynchronizeMessage(SyncMessage {
             sent: Some(Sent { message: Some(msg), .. }),
             ..
-        }) => preview_data_message(msg),
-        ContentBody::CallMessage(_) => Some("Call".to_string()),
-        _ => None,
+        }) => data_message_body(msg),
+        ContentBody::CallMessage(_) => "Call".to_string(),
+        _ => String::new(),
     }
 }
 
-fn preview_data_message(msg: &DataMessage) -> Option<String> {
+fn data_message_body(msg: &DataMessage) -> String {
     if let Some(text) = &msg.body {
         if !text.is_empty() {
-            return Some(text.clone());
+            return text.clone();
         }
     }
     if !msg.attachments.is_empty() {
-        return Some("Attachment".to_string());
+        return "Attachment".to_string();
     }
     if msg.sticker.is_some() {
-        return Some("Sticker".to_string());
+        return "Sticker".to_string();
     }
-    None
+    String::new()
+}
+
+pub async fn load_messages<S: Store>(
+    manager: &Manager<S, Registered>,
+    thread: &Thread,
+) -> anyhow::Result<Vec<Content>> {
+    let iter = manager
+        .store()
+        .messages(thread, ..)
+        .await
+        .context("failed to load messages")?;
+    let mut messages: Vec<Content> = iter
+        .filter_map(|r| r.ok())
+        .filter(|c| !message_body(c).is_empty())
+        .collect();
+    messages.reverse(); // store returns DESC (newest first), display needs ASC
+    Ok(messages)
+}
+
+pub async fn send_to_thread<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    text: String,
+) -> anyhow::Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system time error")?
+        .as_millis() as u64;
+    let data_message = DataMessage {
+        body: Some(text),
+        timestamp: Some(ts),
+        ..Default::default()
+    };
+    match thread {
+        Thread::Contact(service_id) => {
+            manager
+                .send_message(service_id.clone(), data_message, ts)
+                .await
+                .context("failed to send message")?;
+        }
+        Thread::Group(master_key) => {
+            manager
+                .send_message_to_group(master_key, data_message, ts)
+                .await
+                .context("failed to send message to group")?;
+        }
+    }
+    Ok(())
 }
