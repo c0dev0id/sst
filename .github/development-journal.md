@@ -45,6 +45,14 @@ The bundled SQLCipher build in `presage-store-sqlite` uses OpenSSL 3.x `EVP_MAC`
 
 The presage store has no `threads()` listing method. The chat list is assembled manually: `contacts()` yields `Contact { uuid, name, phone_number, ... }`, `groups()` yields `(GroupMasterKeyBytes, Group { title, ... })`. For each, call `messages(thread, ..)` (returns DESC by timestamp) and take the first item as the last-message preview. Sort all entries by that timestamp.
 
+This is the same approach used by flare and gurk-rs. Both clients have the same limitation.
+
+### Group metadata gap after fresh device linking
+
+Presage calls `upsert_group()` (an internal function) during `receive_messages()` to fetch group metadata from Signal's servers and store it in the `groups` table. This fetch can fail immediately after fresh device linking because GV2 credentials are not yet established. When it fails, messages are still stored in `thread_messages` but the `groups` table stays empty for that group — so `groups()` never returns it.
+
+Affected threads (e.g. Note to Self, any group with no activity after re-linking) will not appear in the chat list until a new message arrives and triggers another `upsert_group()` attempt with working credentials. This is a known limitation shared by all presage-based clients. No workaround is implemented — it would require either direct SQLite access or extending the presage-store-sqlite API.
+
 ### ContentExt trait for message timestamps
 
 `Content::timestamp()` is not a method on the struct itself — it's provided by the `presage::store::ContentExt` trait. Must be imported explicitly.
