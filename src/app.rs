@@ -78,6 +78,7 @@ impl App {
             entry.last_preview = update.preview;
             if update.ts > entry.last_ts {
                 entry.last_ts = update.ts;
+                entry.unread = true;
             }
         } else {
             let name = match &update.thread {
@@ -89,6 +90,7 @@ impl App {
                 name,
                 last_preview: update.preview,
                 last_ts: update.ts,
+                unread: true,
             });
         }
         self.threads.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));

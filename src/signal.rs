@@ -17,6 +17,7 @@ pub struct ThreadEntry {
     pub name: String,
     pub last_preview: Option<String>,
     pub last_ts: u64,
+    pub unread: bool,
 }
 
 pub struct MessageUpdate {
@@ -165,7 +166,7 @@ pub async fn list_threads<S: Store>(
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
-            entries.push(ThreadEntry { thread, name, last_preview, last_ts });
+            entries.push(ThreadEntry { thread, name, last_preview, last_ts, unread: false });
         }
     }
 
@@ -183,7 +184,7 @@ pub async fn list_threads<S: Store>(
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
-            entries.push(ThreadEntry { thread, name, last_preview, last_ts });
+            entries.push(ThreadEntry { thread, name, last_preview, last_ts, unread: false });
         }
     }
 
@@ -192,7 +193,7 @@ pub async fn list_threads<S: Store>(
         let thread = Thread::Group(master_key);
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
-            entries.push(ThreadEntry { thread, name: group.title, last_preview, last_ts });
+            entries.push(ThreadEntry { thread, name: group.title, last_preview, last_ts, unread: false });
         }
     }
 
@@ -252,11 +253,26 @@ async fn last_message<S: Store>(
 
 fn extract_preview(content: &Content) -> Option<String> {
     match &content.body {
-        ContentBody::DataMessage(DataMessage { body: Some(text), .. }) => Some(text.clone()),
+        ContentBody::DataMessage(msg) => preview_data_message(msg),
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { message: Some(DataMessage { body: Some(text), .. }), .. }),
+            sent: Some(Sent { message: Some(msg), .. }),
             ..
-        }) => Some(text.clone()),
+        }) => preview_data_message(msg),
         _ => None,
     }
+}
+
+fn preview_data_message(msg: &DataMessage) -> Option<String> {
+    if let Some(text) = &msg.body {
+        if !text.is_empty() {
+            return Some(text.clone());
+        }
+    }
+    if !msg.attachments.is_empty() {
+        return Some("Attachment".to_string());
+    }
+    if msg.sticker.is_some() {
+        return Some("Sticker".to_string());
+    }
+    None
 }

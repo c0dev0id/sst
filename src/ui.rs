@@ -20,9 +20,10 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         .threads
         .iter()
         .map(|t| {
+            let prefix = if t.unread { "* " } else { "  " };
             let text = match t.last_preview.as_deref() {
-                Some(p) if !p.is_empty() => format!("{}: {}", t.name, p),
-                _ => t.name.clone(),
+                Some(p) if !p.is_empty() => format!("{}{}: {}", prefix, t.name, p),
+                _ => format!("{}{}", prefix, t.name),
             };
             ListItem::new(text)
         })
