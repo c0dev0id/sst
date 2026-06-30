@@ -77,10 +77,10 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.relink, args.list, store)).await
+    local.run_until(run(args.relink, args.list, store, db_path.parent().unwrap().to_path_buf())).await
 }
 
-async fn run<S: Store>(relink: bool, list: bool, store: S) -> anyhow::Result<()> {
+async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
     let mut manager = if relink {
         link_device(store).await?
     } else {
@@ -91,8 +91,9 @@ async fn run<S: Store>(relink: bool, list: bool, store: S) -> anyhow::Result<()>
         })?
     };
 
-    signal::sync(&mut manager).await?;
-    let threads = signal::list_threads(&manager).await?;
+    let state = signal::SyncState { data_dir };
+    signal::sync(&mut manager, &state).await?;
+    let threads = signal::list_threads(&manager, &state).await?;
 
     if list {
         println!("--- {} chat(s) ---", threads.len());
