@@ -200,6 +200,12 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
             // Single loop covers both the backlog drain and live phase.
             // QueueEmpty is just ignored — we use start_ts to tell old from new.
             while let Some(event) = stream.next().await {
+                eprintln!("[debug] event={}", match &event {
+                    Received::Content(_) => "Content",
+                    Received::QueueEmpty => "QueueEmpty",
+                    Received::Contacts => "Contacts",
+                    _ => "Other",
+                });
                 let Received::Content(boxed) = event else { continue };
                 let ts = boxed.timestamp();
                 let msg_thread = Thread::try_from(boxed.as_ref()).ok();
