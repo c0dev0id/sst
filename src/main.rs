@@ -75,6 +75,16 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
 
     if args.relink {
+        if db_path.exists() {
+            eprintln!("Warning: this will wipe the local database at {}", db_path.display());
+            eprintln!("All locally stored messages and contacts will be lost.");
+            eprint!("Continue? [y/N] ");
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !answer.trim().eq_ignore_ascii_case("y") {
+                anyhow::bail!("aborted");
+            }
+        }
         let base = db_path.file_name().unwrap().to_string_lossy().into_owned();
         for suffix in &["", "-wal", "-shm"] {
             let p = db_path.with_file_name(format!("{base}{suffix}"));
