@@ -73,6 +73,7 @@ Press `n` from the Chat List to open a full-screen picker of all synced contacts
 
  You  09:31
    Sure, sounds good!  ✓✓
+   [2x❤️, 1x👍]                             ← inline reactions
 
 ── 2026-06-28 14:00 ──                      ← hour gap separator
 
@@ -99,6 +100,8 @@ Long lines are word-wrapped to the terminal width.
 
 Consecutive messages from the same sender are grouped under one header block. An `── date time ──` separator is inserted when the gap between messages exceeds one hour.
 
+Reactions are shown inline below the message body: `[2x❤️, 1x👍]`.
+
 Own sent messages show a receipt indicator on the last line:
 - `✓` — delivered
 - `✓✓` — read
@@ -114,30 +117,41 @@ Always focused. Grows vertically as content requires (no line cap). A block curs
 | ← / → | Move cursor left / right |
 | ↑ / ↓ | Move cursor up / down (multi-line) |
 | Backspace | Delete character left of cursor |
-| Tab | Complete slash command or @mention (unique match) |
-| Tab Tab | Show all completion candidates on status bar |
+| Tab | Complete slash command, @mention, or emoji shortcode |
 | Esc | Clear selection / return to Chat List |
+
+Tab completes immediately on a unique match. With multiple candidates, all matches are shown on the status bar.
 
 ### Slash commands
 
-`/quit` exits the app from within a chat.
+Slash commands are available in the input bar. Commands that require a selected message show an error on the status bar if none is active.
 
-`/reply <text>` sends `<text>` as a quoted reply to the currently selected message (requires Shift+↑ to select first). The quoted author and first line are shown inline above the reply body.
+| Command | Requires selection | Action |
+|---------|-------------------|--------|
+| `/quit` | No | Exit the app |
+| `/reply <text>` | Yes | Send `<text>` as a quoted reply |
+| `/react <emoji>` | Yes | React to the selected message |
+| `/react` | Yes | Show existing reaction counts on the status bar |
 
-Tab-completion applies to slash commands: `/r` + Tab completes to `/reply ` when it is the only match; `/` + Tab Tab lists all commands on the status bar.
+`/react` accepts either a raw emoji (`/react ❤️`) or a gemoji shortcode (`/react wave` → 👋). Sending the same emoji twice toggles it off.
+
+Tab-completion for `/react <shortcode>`:
+- `/react <Tab>` shows all available shortcodes with their emoji on the status bar
+- `/react w<Tab>` narrows to shortcodes starting with `w` (e.g. `wave (👋)  weary (😩)`)
+- Completes immediately when the partial matches exactly one shortcode
 
 ### @mention completion
 
-`@ali` + Tab completes to `@Alice Wagner ` when it is the only match among known contacts. `@` + Tab Tab lists all candidates on the status bar.
+`@ali` + Tab completes to `@Alice Wagner ` when it is the only match among known contacts. `@` + Tab lists all candidates on the status bar.
 
 ---
 
 ## Status bar
 
-Shows key hints by default. Overridden by autocomplete candidates after a double-Tab (clears on the next keystroke or Backspace). While a message is selected, shows sender, timestamp, and position:
+Shows key hints by default. After Tab, completion candidates are shown (clears on the next keystroke). While a message is selected, shows sender, timestamp, and position — Tab candidates take priority over the selection info:
 
 ```
-  [3/17]  Alice Wagner  ·  2026-06-28 09:14  |  /reply <text>↵   Shift+↑↓   Esc deselect
+  [3/17]  Alice Wagner  ·  2026-06-28 09:14  |  /reply <text>↵   /react <emoji>   Shift+↑↓   Esc deselect
 ```
 
 ---
@@ -160,7 +174,7 @@ Syncs new messages, then prints all conversations with a one-line preview to std
 sst --contact-list
 ```
 
-Syncs the contact list from the primary device, then prints `<uuid> <name>` for every known contact and group to stdout. Useful for discovering UUIDs to use with the other CLI commands.
+Syncs the contact list from the primary device, then prints `<uuid> <name>` for every known contact and group to stdout. For contacts with no name (group members not in the phone's address book), a Signal profile fetch is attempted using any cached profile key — resolved names are shown immediately and cached locally for future use.
 
 ```
 96c9d3f9-fccf-4517-a0a8-f4bf72a63e48 Note to Self
