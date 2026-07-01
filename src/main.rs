@@ -74,6 +74,21 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let data_dir = db_path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
 
+    if args.relink {
+        // Re-linking generates new identity keys; the old database is invalid after
+        // that point anyway. Wipe it now so a corrupted DB doesn't block re-linking.
+        for suffix in &["", "-wal", "-shm"] {
+            let p = db_path.with_file_name(
+                format!("{}{}", db_path.file_name().unwrap().to_string_lossy(), suffix)
+            );
+            if p.exists() {
+                std::fs::remove_file(&p)
+                    .with_context(|| format!("failed to remove {}", p.display()))?;
+            }
+        }
+        eprintln!("Database wiped. Linking new device…");
+    }
+
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::metadata::LevelFilter::WARN.into())
         .from_env_lossy()
