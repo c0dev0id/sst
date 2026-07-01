@@ -337,6 +337,18 @@ fn data_message_body(msg: &DataMessage) -> String {
     String::new()
 }
 
+/// Look up a contact's display name by UUID; falls back to the UUID string.
+pub async fn lookup_contact_name<S: Store>(
+    manager: &Manager<S, Registered>,
+    uuid: Uuid,
+) -> String {
+    let service_id = presage::libsignal_service::protocol::ServiceId::Aci(uuid.into());
+    match manager.store().contact_by_id(&service_id).await {
+        Ok(Some(contact)) => contact_display_name(&contact),
+        _ => uuid.to_string(),
+    }
+}
+
 pub async fn load_messages<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,

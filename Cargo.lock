@@ -3108,6 +3108,7 @@ dependencies = [
  "presage-store-sqlite",
  "qr2term",
  "ratatui",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
