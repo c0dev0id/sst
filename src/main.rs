@@ -179,8 +179,13 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
 
     if let Some(recipient) = read_stream {
         let thread = parse_thread_id(&recipient)?;
-        // Tracks timestamps we have already emitted so reconnects don't produce duplicates.
         let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        // Only emit messages whose timestamp is at or after this point.
+        // Backlog messages predating the session are silently skipped.
+        let start_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
         'reconnect: loop {
             let mut stream = Box::pin(match manager.receive_messages().await {
@@ -192,33 +197,18 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
                 }
             });
 
-            // Drain the pending queue silently; reconnect if the stream closes first.
-            loop {
-                match stream.next().await {
-                    Some(Received::QueueEmpty) => break,
-                    Some(_) => {}
-                    None => {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue 'reconnect;
-                    }
-                }
-            }
-
-            // Emit new messages for this thread as they arrive.
+            // Single loop covers both the backlog drain and live phase.
+            // QueueEmpty is just ignored — we use start_ts to tell old from new.
             while let Some(event) = stream.next().await {
                 let Received::Content(boxed) = event else { continue };
-                if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) {
-                    continue;
-                }
-                let body = signal::message_body(&boxed);
-                if body.is_empty() {
-                    continue;
-                }
                 let ts = boxed.timestamp();
-                if seen.contains(&ts) {
-                    continue;
-                }
-                seen.insert(ts);
+                let msg_thread = Thread::try_from(boxed.as_ref()).ok();
+                eprintln!("[debug] ts={ts} start={start_ts} thread={msg_thread:?} target={thread:?}");
+                if ts < start_ts { continue; }
+                if msg_thread.as_ref() != Some(&thread) { continue; }
+                let body = signal::message_body(&boxed);
+                if body.is_empty() { continue; }
+                if !seen.insert(ts) { continue; }
                 let sender_uuid = boxed.metadata.sender.raw_uuid();
                 let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
                 println!("{}", json_line(ts, sender_uuid, &sender_name, &body));
