@@ -33,7 +33,6 @@ pub struct ChatState {
     pub selected_message: Option<usize>,     // index into `messages`
     pub delivered: HashSet<u64>,             // timestamps of our messages confirmed delivered
     pub read: HashSet<u64>,                  // timestamps of our messages confirmed read
-    pub tab_pressed: bool,                   // true if the last keypress was Tab
     pub autocomplete_hint: Option<String>,   // shown on status bar after double-Tab
     pub reactions: ReactionMap,
 }
@@ -98,7 +97,6 @@ impl App {
             selected_message: None,
             delivered,
             read,
-            tab_pressed: false,
             autocomplete_hint: None,
             reactions,
         });
@@ -175,7 +173,6 @@ impl App {
             if has_selection {
                 if let Some(chat) = &mut self.chat {
                     chat.selected_message = None;
-                    chat.tab_pressed = false;
                     chat.autocomplete_hint = None;
                 }
                 return None;
@@ -187,9 +184,7 @@ impl App {
 
         let chat = self.chat.as_mut()?;
 
-        // Reset autocomplete state on any key that isn't Tab.
         if key.code != KeyCode::Tab {
-            chat.tab_pressed = false;
             chat.autocomplete_hint = None;
         }
 
@@ -275,8 +270,6 @@ impl App {
                 None
             }
             KeyCode::Tab => {
-                let was_tab = chat.tab_pressed;
-                chat.tab_pressed = true;
                 // Field borrow splitting: self.threads is separate from self.chat.
                 let threads = &self.threads;
                 let has_selection = chat.selected_message.is_some();
@@ -288,8 +281,7 @@ impl App {
                         chat.input.replace_range(start..end, &rep);
                         chat.cursor = start + rep.len();
                         chat.autocomplete_hint = None;
-                        chat.tab_pressed = false;
-                    } else if was_tab {
+                    } else {
                         chat.autocomplete_hint = Some(candidates.join("  "));
                     }
                 }
@@ -473,7 +465,7 @@ fn completion_candidates(
     // /react <shortcode> argument completion — must come before the command-name block
     // because "/react w" starts with '/' and contains a space, so it won't reach below.
     if let Some(rest) = before.strip_prefix("/react ") {
-        if has_selection && !rest.is_empty() && rest.is_ascii() {
+        if has_selection && rest.is_ascii() {
             let partial = rest.to_lowercase();
             let mut candidates: Vec<String> = emojis::iter()
                 .flat_map(|e| e.shortcodes().filter(|s| s.starts_with(partial.as_str())).map(str::to_string))
