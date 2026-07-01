@@ -273,7 +273,7 @@ impl App {
                 // Field borrow splitting: self.threads is separate from self.chat.
                 let threads = &self.threads;
                 let has_selection = chat.selected_message.is_some();
-                if let Some((start, end, candidates)) =
+                if let Some((start, end, candidates, display)) =
                     completion_candidates(&chat.input, chat.cursor, threads, has_selection)
                 {
                     if candidates.len() == 1 {
@@ -282,7 +282,8 @@ impl App {
                         chat.cursor = start + rep.len();
                         chat.autocomplete_hint = None;
                     } else {
-                        chat.autocomplete_hint = Some(candidates.join("  "));
+                        let labels = display.as_deref().unwrap_or(&candidates);
+                        chat.autocomplete_hint = Some(labels.join("  "));
                     }
                 }
                 None
@@ -454,12 +455,15 @@ fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
 /// Slash command names: triggered when input[..cursor] starts with '/' with no space.
 /// /react <arg>:        triggered when input starts with "/react " and the rest is ASCII.
 /// @mentions:           triggered when a bare '@' token ends at cursor.
+// Returns (replace_start, replace_end, completion_values, display_labels).
+// display_labels is Some when the hint text should differ from the completion values
+// (e.g. emoji shortcodes annotated with the actual emoji character).
 fn completion_candidates(
     input: &str,
     cursor: usize,
     threads: &[ThreadEntry],
     has_selection: bool,
-) -> Option<(usize, usize, Vec<String>)> {
+) -> Option<(usize, usize, Vec<String>, Option<Vec<String>>)> {
     let before = &input[..cursor.min(input.len())];
 
     // /react <shortcode> argument completion — must come before the command-name block
@@ -467,13 +471,19 @@ fn completion_candidates(
     if let Some(rest) = before.strip_prefix("/react ") {
         if has_selection && rest.is_ascii() {
             let partial = rest.to_lowercase();
-            let mut candidates: Vec<String> = emojis::iter()
-                .flat_map(|e| e.shortcodes().filter(|s| s.starts_with(partial.as_str())).map(str::to_string))
+            let mut pairs: Vec<(String, String)> = emojis::iter()
+                .flat_map(|e| {
+                    e.shortcodes()
+                        .filter(|s| s.starts_with(partial.as_str()))
+                        .map(move |s| (s.to_string(), format!("{} ({})", s, e)))
+                })
                 .collect();
-            candidates.sort_unstable();
-            candidates.dedup();
-            if candidates.is_empty() { return None; }
-            return Some(("/react ".len(), cursor, candidates));
+            pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            pairs.dedup_by(|a, b| a.0 == b.0);
+            if pairs.is_empty() { return None; }
+            let display = pairs.iter().map(|(_, d)| d.clone()).collect();
+            let candidates = pairs.into_iter().map(|(c, _)| c).collect();
+            return Some(("/react ".len(), cursor, candidates, Some(display)));
         }
     }
 
@@ -486,7 +496,7 @@ fn completion_candidates(
             .collect();
         candidates.sort();
         if candidates.is_empty() { return None; }
-        return Some((0, cursor, candidates));
+        return Some((0, cursor, candidates, None));
     }
 
     if let Some(at_pos) = before.rfind('@') {
@@ -502,7 +512,7 @@ fn completion_candidates(
                 .collect();
             candidates.sort();
             if candidates.is_empty() { return None; }
-            return Some((at_pos, cursor, candidates));
+            return Some((at_pos, cursor, candidates, None));
         }
     }
 
