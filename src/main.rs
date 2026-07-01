@@ -9,7 +9,7 @@ use futures::{StreamExt, channel::oneshot, future};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
-use presage::store::Store;
+use presage::store::{Store, Thread};
 use presage::Manager;
 use presage_store_sqlite::SqliteStore;
 use std::path::PathBuf;
@@ -28,6 +28,9 @@ struct Args {
 
     #[clap(long, help = "Sync messages and print chat list, then exit")]
     list: bool,
+
+    #[clap(long, help = "Sync contacts and print all contacts and groups, then exit")]
+    contact_list: bool,
 
     #[clap(long, help = "Path to the SQLite database (default: XDG data dir)")]
     db: Option<PathBuf>,
@@ -89,10 +92,10 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.relink, args.list, store, data_dir)).await
+    local.run_until(run(args.relink, args.list, args.contact_list, store, data_dir)).await
 }
 
-async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
+async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
     let mut manager = if relink {
         link_device(store).await?
     } else {
@@ -112,6 +115,23 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
         for entry in &threads {
             let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
             println!("{}: {}", entry.name, preview);
+        }
+        return Ok(());
+    }
+
+    if contact_list {
+        signal::sync(&mut manager, &mut state).await?;
+        let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
+        for entry in &contacts {
+            match &entry.thread {
+                Thread::Contact(sid) => {
+                    println!("{} {}", sid.raw_uuid(), entry.name);
+                }
+                Thread::Group(key) => {
+                    let hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("{} {}", hex, entry.name);
+                }
+            }
         }
         return Ok(());
     }
