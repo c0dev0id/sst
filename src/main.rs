@@ -9,6 +9,8 @@ use futures::{StreamExt, channel::oneshot, future};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
+use presage::libsignal_service::prelude::Uuid;
+use presage::libsignal_service::protocol::ServiceId;
 use presage::store::{Store, Thread};
 use presage::Manager;
 use presage_store_sqlite::SqliteStore;
@@ -31,6 +33,9 @@ struct Args {
 
     #[clap(long, help = "Sync contacts and print all contacts and groups, then exit")]
     contact_list: bool,
+
+    #[clap(long, value_name = "UUID|HEX", help = "Send stdin as a message to a contact (UUID) or group (64-char hex)")]
+    send: Option<String>,
 
     #[clap(long, help = "Path to the SQLite database (default: XDG data dir)")]
     db: Option<PathBuf>,
@@ -92,10 +97,10 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.relink, args.list, args.contact_list, store, data_dir)).await
+    local.run_until(run(args.relink, args.list, args.contact_list, args.send, store, data_dir)).await
 }
 
-async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
+async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Option<String>, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
     let mut manager = if relink {
         link_device(store).await?
     } else {
@@ -136,6 +141,18 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, store: S, d
         return Ok(());
     }
 
+    if let Some(recipient) = send {
+        let thread = parse_thread_id(&recipient)?;
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+        let text = text.trim_end_matches(['\n', '\r']).to_string();
+        if text.is_empty() {
+            anyhow::bail!("nothing to send (stdin was empty)");
+        }
+        signal::send_to_thread(&mut manager, &thread, text).await?;
+        return Ok(());
+    }
+
     let stream = signal::connect(&mut manager, &mut state).await?;
     let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
 
@@ -150,6 +167,22 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, store: S, d
     });
 
     app::run(threads, state.own_aci, state.data_dir, manager, rx).await
+}
+
+fn parse_thread_id(s: &str) -> anyhow::Result<Thread> {
+    // UUID → 1:1 contact thread
+    if let Ok(uuid) = s.parse::<Uuid>() {
+        return Ok(Thread::Contact(ServiceId::Aci(uuid.into())));
+    }
+    // 64 hex chars → group master key
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        let bytes: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16))
+            .collect::<Result<_, _>>()?;
+        let key: [u8; 32] = bytes.try_into().expect("32 bytes");
+        return Ok(Thread::Group(key));
+    }
+    anyhow::bail!("invalid recipient '{}': expected a UUID (contact) or 64-char hex string (group)", s)
 }
 
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {
