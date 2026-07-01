@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `/react <emoji|shortcode>` slash command: reacts to the selected message; `/react wave` resolves via `emojis` crate shortcode lookup (👋), direct emoji passthrough for non-ASCII input (e.g. `/react ❤️`); sending the same emoji again toggles it off (`remove: true`)
+- `/react` (no argument): shows existing reaction counts for the selected message on the status bar
+- Reactions rendered inline below each message body: `[2x❤️, 1x👍]` in gray; reactions are loaded on chat open and refreshed on every incoming signal event
+- Status bar selection hint now mentions `/react <emoji>` alongside `/reply`
+
 ### Fixed
 - Signal WebSocket stream now reconnects automatically when presage closes it after delivering the first live event; fixes incoming messages not appearing in TUI after the first one, and `--read-stream` not delivering subsequent messages
 
