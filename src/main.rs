@@ -161,6 +161,7 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
     }
 
     if let Some(recipient) = read {
+        signal::sync(&mut manager, &mut state).await?;
         let thread = parse_thread_id(&recipient)?;
         let messages = signal::load_messages(&manager, &thread).await?;
         for msg in &messages {
