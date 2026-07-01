@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
-use crate::signal::{self, ThreadEntry};
+use crate::signal::{self, ReactionMap, ThreadEntry};
 
 pub enum View {
     ChatList,
@@ -35,6 +35,7 @@ pub struct ChatState {
     pub read: HashSet<u64>,                  // timestamps of our messages confirmed read
     pub tab_pressed: bool,                   // true if the last keypress was Tab
     pub autocomplete_hint: Option<String>,   // shown on status bar after double-Tab
+    pub reactions: ReactionMap,              // target_ts → emoji → reactor UUID bytes
 }
 
 pub enum AppCmd {
@@ -84,6 +85,7 @@ impl App {
         messages: Vec<Content>,
         delivered: HashSet<u64>,
         read: HashSet<u64>,
+        reactions: ReactionMap,
     ) {
         self.chat = Some(ChatState {
             thread,
@@ -98,6 +100,7 @@ impl App {
             read,
             tab_pressed: false,
             autocomplete_hint: None,
+            reactions,
         });
         self.view = View::ChatWindow;
     }
@@ -392,6 +395,36 @@ impl App {
     }
 }
 
+// ── Reaction helpers ──────────────────────────────────────────────────────────
+
+/// Resolve `/react <arg>` input to an emoji string.
+/// Non-ASCII input is treated as a raw emoji; ASCII input is looked up as a shortcode.
+fn resolve_emoji(arg: &str) -> Option<String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return None;
+    }
+    if !arg.is_ascii() {
+        return Some(arg.to_string());
+    }
+    emojis::get_by_shortcode(arg).map(|e| e.to_string())
+}
+
+/// Format a reaction map entry as a status-bar hint string, e.g. "2x❤️  1x👍".
+fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
+    let Some(map) = reactions.get(&target_ts) else {
+        return "(no reactions)".to_string();
+    };
+    if map.is_empty() {
+        return "(no reactions)".to_string();
+    }
+    let mut pairs: Vec<(&str, usize)> = map.iter()
+        .map(|(e, s)| (e.as_str(), s.len()))
+        .collect();
+    pairs.sort_by_key(|(e, _)| *e);
+    pairs.iter().map(|(e, c)| format!("{}x{}", c, e)).collect::<Vec<_>>().join("  ")
+}
+
 // ── Tab completion ────────────────────────────────────────────────────────────
 
 /// Returns (replace_start_byte, replace_end_byte, candidates) or None.
@@ -518,6 +551,7 @@ async fn execute_cmd<S: Store>(
             let (delivered, read) = signal::load_receipt_state(manager, &thread)
                 .await
                 .unwrap_or_default();
+            let reactions = signal::load_reactions(manager, &thread).await.unwrap_or_default();
 
             let own_aci = app.own_aci;
             let to_ack: Vec<u64> = messages
@@ -526,7 +560,7 @@ async fn execute_cmd<S: Store>(
                 .map(|m| m.timestamp())
                 .collect();
 
-            app.open_chat(thread.clone(), name, messages, delivered, read);
+            app.open_chat(thread.clone(), name, messages, delivered, read, reactions);
 
             if let Err(e) = signal::send_read_receipt(manager, &thread, to_ack).await {
                 tracing::warn!("send_read_receipt: {e}");
@@ -575,23 +609,50 @@ async fn execute_cmd<S: Store>(
 
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                if let Some(reply_body) = trimmed.strip_prefix("/reply").map(str::trim) {
-                    if !reply_body.is_empty() {
-                        if let Some((q_ts, q_author, q_text)) = quote_info {
-                            signal::send_reply(manager, &thread, reply_body.to_string(), q_ts, q_author, q_text).await?;
+                if let Some(react_arg) = trimmed.strip_prefix("/react").map(str::trim) {
+                    if react_arg.is_empty() {
+                        // /react with no arg: show current reactions on status bar.
+                        if let Some((target_ts, _, _)) = quote_info {
+                            if let Some(chat) = &mut app.chat {
+                                let hint = reaction_hint(&chat.reactions, target_ts);
+                                chat.autocomplete_hint = Some(hint);
+                            }
                         }
-                        // /reply with no active selection: silently drop — no orphan reply.
+                    } else if let Some((target_ts, target_author, _)) = quote_info {
+                        if let Some(emoji) = resolve_emoji(react_arg) {
+                            let remove = {
+                                let own_bytes = app.own_aci.map(|u| *u.as_bytes());
+                                app.chat.as_ref()
+                                    .and_then(|c| c.reactions.get(&target_ts))
+                                    .and_then(|m| m.get(&emoji))
+                                    .and_then(|s| own_bytes.map(|b| s.contains(&b)))
+                                    .unwrap_or(false)
+                            };
+                            signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
+                            if let Ok(rxns) = signal::load_reactions(manager, &thread).await {
+                                if let Some(chat) = &mut app.chat {
+                                    chat.reactions = rxns;
+                                }
+                            }
+                        }
                     }
-                    // /reply with no body: silently drop.
                 } else {
-                    signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
-                }
-                // Reload immediately — presage writes the sent message to the local
-                // store before returning, so it's available here without waiting for
-                // the SyncMessage echo (which may arrive on a dying stream).
-                if let Ok(msgs) = signal::load_messages(manager, &thread).await {
-                    if let Some(chat) = &mut app.chat {
-                        chat.messages = msgs;
+                    if let Some(reply_body) = trimmed.strip_prefix("/reply").map(str::trim) {
+                        if !reply_body.is_empty() {
+                            if let Some((q_ts, q_author, q_text)) = quote_info {
+                                signal::send_reply(manager, &thread, reply_body.to_string(), q_ts, q_author, q_text).await?;
+                            }
+                        }
+                    } else {
+                        signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
+                    }
+                    // Reload immediately — presage writes the sent message to the local
+                    // store before returning, so it's available here without waiting for
+                    // the SyncMessage echo (which may arrive on a dying stream).
+                    if let Ok(msgs) = signal::load_messages(manager, &thread).await {
+                        if let Some(chat) = &mut app.chat {
+                            chat.messages = msgs;
+                        }
                     }
                 }
             }
@@ -657,11 +718,15 @@ pub async fn run<S: Store>(
                                         .map(|m| m.timestamp())
                                         .collect();
 
+                                    let reactions = signal::load_reactions(&manager, &thread).await.ok();
                                     if let Some(chat) = &mut app.chat {
                                         chat.messages = msgs;
                                         if let Some((del, rd)) = receipt_state {
                                             chat.delivered = del;
                                             chat.read = rd;
+                                        }
+                                        if let Some(rxns) = reactions {
+                                            chat.reactions = rxns;
                                         }
                                     }
 

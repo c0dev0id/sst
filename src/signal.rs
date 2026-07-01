@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::pin::Pin;
 
@@ -11,6 +11,10 @@ use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::proto::{DataMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
+
+/// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
+/// Apply in chronological order to handle add/remove toggles correctly.
+pub type ReactionMap = HashMap<u64, HashMap<String, HashSet<[u8; 16]>>>;
 
 pub struct ThreadEntry {
     pub thread: Thread,
@@ -409,6 +413,91 @@ pub async fn load_messages<S: Store>(
         .collect();
     messages.reverse(); // store returns DESC (newest first), display needs ASC
     Ok(messages)
+}
+
+/// Load all reaction events for the thread and reduce them into a per-target-ts,
+/// per-emoji set of reactor UUID bytes. Later events override earlier ones for
+/// the same (sender, emoji, target) triple, implementing the toggle semantics.
+pub async fn load_reactions<S: Store>(
+    manager: &Manager<S, Registered>,
+    thread: &Thread,
+) -> anyhow::Result<ReactionMap> {
+    let iter = manager
+        .store()
+        .messages(thread, ..)
+        .await
+        .context("failed to load messages for reactions")?;
+
+    let mut events: Vec<(u64, [u8; 16], String, bool, u64)> = Vec::new();
+
+    for result in iter {
+        let Ok(content) = result else { continue };
+        let (reaction, sender_uuid) = match &content.body {
+            ContentBody::DataMessage(msg) => {
+                let Some(r) = &msg.reaction else { continue };
+                (r, content.metadata.sender.raw_uuid())
+            }
+            ContentBody::SynchronizeMessage(SyncMessage {
+                sent: Some(Sent { message: Some(msg), .. }),
+                ..
+            }) => {
+                let Some(r) = &msg.reaction else { continue };
+                (r, content.metadata.sender.raw_uuid())
+            }
+            _ => continue,
+        };
+
+        let Some(emoji) = reaction.emoji.as_ref().filter(|e| !e.is_empty()) else { continue };
+        let remove = reaction.remove.unwrap_or(false);
+        let Some(target_ts) = reaction.target_sent_timestamp else { continue };
+
+        events.push((content.timestamp(), *sender_uuid.as_bytes(), emoji.clone(), remove, target_ts));
+    }
+
+    // Store is DESC (newest first); process in chronological order.
+    events.sort_unstable_by_key(|e| e.0);
+
+    let mut result: ReactionMap = HashMap::new();
+    for (_, sender_bytes, emoji, remove, target_ts) in events {
+        let per_emoji = result.entry(target_ts).or_default().entry(emoji).or_default();
+        if remove {
+            per_emoji.remove(&sender_bytes);
+        } else {
+            per_emoji.insert(sender_bytes);
+        }
+    }
+
+    for emoji_map in result.values_mut() {
+        emoji_map.retain(|_, senders| !senders.is_empty());
+    }
+    result.retain(|_, emoji_map| !emoji_map.is_empty());
+
+    Ok(result)
+}
+
+pub async fn send_reaction<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    emoji: String,
+    target_ts: u64,
+    target_author: Uuid,
+    remove: bool,
+) -> anyhow::Result<()> {
+    let ts = now_millis()?;
+    let reaction = data_message::Reaction {
+        emoji: Some(emoji),
+        remove: Some(remove),
+        target_author_aci: Some(target_author.to_string()),
+        target_author_aci_binary: Some(target_author.as_bytes().to_vec()),
+        target_sent_timestamp: Some(target_ts),
+        ..Default::default()
+    };
+    let data_message = DataMessage {
+        reaction: Some(reaction),
+        timestamp: Some(ts),
+        ..Default::default()
+    };
+    dispatch_send(manager, thread, data_message, ts).await
 }
 
 pub async fn send_to_thread<S: Store>(

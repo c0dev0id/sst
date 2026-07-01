@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Local};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -282,6 +284,15 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             lines.push(if is_selected { line.style(highlight) } else { line });
         }
 
+        // Reaction summary, e.g. "  [2x❤️, 1x👍]"
+        if let Some(rxn) = format_reactions(chat.reactions.get(&ts)) {
+            let line = Line::from(Span::styled(
+                format!("  {}", rxn),
+                Style::default().fg(Color::DarkGray),
+            ));
+            lines.push(if is_selected { line.style(highlight) } else { line });
+        }
+
         msg_body_ends.push(lines.len().saturating_sub(1));
     }
 
@@ -393,7 +404,7 @@ fn chat_status_bar(app: &App) -> String {
             let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
             let ts = fmt_ts_long(content.timestamp());
             let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
-            return format!("  [{}]  {}  ·  {}  |  /reply <text>↵   Shift+↑↓   Esc deselect", pos, sender, ts);
+            return format!("  [{}]  {}  ·  {}  |  /reply <text>↵   /react <emoji>   Shift+↑↓   Esc deselect", pos, sender, ts);
         }
     }
     if let Some(hint) = &chat.autocomplete_hint {
@@ -464,4 +475,16 @@ fn fmt_ts_long(ts_ms: u64) -> String {
     DateTime::from_timestamp(secs, 0)
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
+}
+
+fn format_reactions(map: Option<&HashMap<String, HashSet<[u8; 16]>>>) -> Option<String> {
+    let map = map?;
+    if map.is_empty() {
+        return None;
+    }
+    let mut pairs: Vec<(&str, usize)> = map.iter()
+        .map(|(e, s)| (e.as_str(), s.len()))
+        .collect();
+    pairs.sort_by_key(|(e, _)| *e);
+    Some(format!("[{}]", pairs.iter().map(|(e, c)| format!("{}x{}", c, e)).collect::<Vec<_>>().join(", ")))
 }
