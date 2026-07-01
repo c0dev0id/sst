@@ -132,6 +132,7 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
     }
 
     if contact_list {
+        eprintln!("Syncing contacts… (this can take a few seconds)");
         signal::sync_contacts(&mut manager, &mut state).await?;
         if let Some(own_uuid) = state.own_aci {
             println!("{} Note to Self", own_uuid);
