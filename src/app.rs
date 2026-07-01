@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use presage::Manager;
 use presage::manager::Registered;
 use presage::model::messages::Received;
@@ -12,7 +13,6 @@ use presage::libsignal_service::prelude::Uuid;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
-use tokio::sync::mpsc;
 
 use crate::signal::{self, ThreadEntry};
 
@@ -494,12 +494,12 @@ fn cursor_down(input: &str, cursor: usize) -> usize {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn next_signal(rx: &mut Option<mpsc::Receiver<Received>>) -> Option<Received> {
-    match rx {
-        Some(r) => {
-            let v = r.recv().await;
+async fn poll_stream(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>>>>) -> Option<Received> {
+    match stream {
+        Some(s) => {
+            let v = s.next().await;
             if v.is_none() {
-                *rx = None;
+                *stream = None;
             }
             v
         }
@@ -605,7 +605,7 @@ pub async fn run<S: Store>(
     own_aci: Option<Uuid>,
     data_dir: PathBuf,
     mut manager: Manager<S, Registered>,
-    rx: mpsc::Receiver<Received>,
+    stream: Pin<Box<dyn Stream<Item = Received>>>,
 ) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -616,7 +616,7 @@ pub async fn run<S: Store>(
 
     let mut app = App::new(threads, own_aci, data_dir);
     let mut events = EventStream::new();
-    let mut rx = Some(rx);
+    let mut signal_stream: Option<Pin<Box<dyn Stream<Item = Received>>>> = Some(stream);
 
     let result: anyhow::Result<()> = async {
         loop {
@@ -634,7 +634,7 @@ pub async fn run<S: Store>(
                         _ => {}
                     }
                 }
-                event = next_signal(&mut rx) => {
+                event = poll_stream(&mut signal_stream) => {
                     if let Some(received) = event {
                         app.on_signal(received);
                         // Reload chat messages and receipt state on any incoming event.
@@ -672,6 +672,12 @@ pub async fn run<S: Store>(
                                     }
                                 }
                             }
+                        }
+                    } else {
+                        // Stream closed — reconnect.
+                        match manager.receive_messages().await {
+                            Ok(s) => signal_stream = Some(Box::pin(s)),
+                            Err(e) => tracing::warn!("signal stream reconnect failed: {e}"),
                         }
                     }
                 }

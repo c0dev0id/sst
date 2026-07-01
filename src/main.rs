@@ -200,18 +200,10 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
             // Single loop covers both the backlog drain and live phase.
             // QueueEmpty is just ignored — we use start_ts to tell old from new.
             while let Some(event) = stream.next().await {
-                eprintln!("[debug] event={}", match &event {
-                    Received::Content(_) => "Content",
-                    Received::QueueEmpty => "QueueEmpty",
-                    Received::Contacts => "Contacts",
-                    _ => "Other",
-                });
                 let Received::Content(boxed) = event else { continue };
                 let ts = boxed.timestamp();
-                let msg_thread = Thread::try_from(boxed.as_ref()).ok();
-                eprintln!("[debug] ts={ts} start={start_ts} thread={msg_thread:?} target={thread:?}");
                 if ts < start_ts { continue; }
-                if msg_thread.as_ref() != Some(&thread) { continue; }
+                if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) { continue; }
                 let body = signal::message_body(&boxed);
                 if body.is_empty() { continue; }
                 if !seen.insert(ts) { continue; }
@@ -229,17 +221,7 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
     let stream = signal::connect(&mut manager, &mut state).await?;
     let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
 
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    tokio::task::spawn_local(async move {
-        futures::pin_mut!(stream);
-        while let Some(event) = stream.next().await {
-            if tx.send(event).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    app::run(threads, state.own_aci, state.data_dir, manager, rx).await
+    app::run(threads, state.own_aci, state.data_dir, manager, stream).await
 }
 
 fn json_line(ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str) -> String {
