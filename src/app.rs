@@ -494,7 +494,7 @@ fn cursor_down(input: &str, cursor: usize) -> usize {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn poll_stream(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>>>>) -> Option<Received> {
+async fn next_or_pending(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>>>>) -> Option<Received> {
     match stream {
         Some(s) => {
             let v = s.next().await;
@@ -605,7 +605,7 @@ pub async fn run<S: Store>(
     own_aci: Option<Uuid>,
     data_dir: PathBuf,
     mut manager: Manager<S, Registered>,
-    stream: Pin<Box<dyn Stream<Item = Received>>>,
+    signal_stream: Pin<Box<dyn Stream<Item = Received>>>,
 ) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -616,7 +616,7 @@ pub async fn run<S: Store>(
 
     let mut app = App::new(threads, own_aci, data_dir);
     let mut events = EventStream::new();
-    let mut signal_stream: Option<Pin<Box<dyn Stream<Item = Received>>>> = Some(stream);
+    let mut signal_stream: Option<Pin<Box<dyn Stream<Item = Received>>>> = Some(signal_stream);
 
     let result: anyhow::Result<()> = async {
         loop {
@@ -634,7 +634,7 @@ pub async fn run<S: Store>(
                         _ => {}
                     }
                 }
-                event = poll_stream(&mut signal_stream) => {
+                event = next_or_pending(&mut signal_stream) => {
                     if let Some(received) = event {
                         app.on_signal(received);
                         // Reload chat messages and receipt state on any incoming event.
@@ -674,7 +674,7 @@ pub async fn run<S: Store>(
                             }
                         }
                     } else {
-                        // Stream closed — reconnect.
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         match manager.receive_messages().await {
                             Ok(s) => signal_stream = Some(Box::pin(s)),
                             Err(e) => tracing::warn!("signal stream reconnect failed: {e}"),

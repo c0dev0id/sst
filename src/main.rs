@@ -75,16 +75,12 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
 
     if args.relink {
-        // Re-linking generates new identity keys; the old database is invalid after
-        // that point anyway. Wipe it now so a corrupted DB doesn't block re-linking.
+        let base = db_path.file_name().unwrap().to_string_lossy().into_owned();
         for suffix in &["", "-wal", "-shm"] {
-            let p = db_path.with_file_name(
-                format!("{}{}", db_path.file_name().unwrap().to_string_lossy(), suffix)
-            );
-            if p.exists() {
-                std::fs::remove_file(&p)
-                    .with_context(|| format!("failed to remove {}", p.display()))?;
-            }
+            let p = db_path.with_file_name(format!("{base}{suffix}"));
+            std::fs::remove_file(&p).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }
+            }).with_context(|| format!("failed to remove {}", p.display()))?;
         }
         eprintln!("Database wiped. Linking new device…");
     }
