@@ -415,12 +415,6 @@ pub async fn load_messages<S: Store>(
     Ok(load_messages_and_reactions(manager, thread).await?.0)
 }
 
-pub async fn load_reactions<S: Store>(
-    manager: &Manager<S, Registered>,
-    thread: &Thread,
-) -> anyhow::Result<ReactionMap> {
-    Ok(load_messages_and_reactions(manager, thread).await?.1)
-}
 
 /// Single-pass load: splits the thread's message store into displayable messages
 /// and a reduced ReactionMap. Avoids two separate full scans when both are needed.

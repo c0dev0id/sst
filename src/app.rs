@@ -415,10 +415,8 @@ impl SlashCmd<'_> {
         }
     }
 
-    fn def(&self) -> &'static SlashCmdDef {
-        let n = self.name();
-        SLASH_COMMANDS.iter().find(|d| d.name == n)
-            .expect("SlashCmd variant missing from SLASH_COMMANDS")
+    fn needs_selection(&self) -> bool {
+        matches!(self, Self::React(_) | Self::Reply(_))
     }
 }
 
@@ -587,6 +585,22 @@ async fn next_or_pending(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>
     }
 }
 
+// Reload messages + reactions from the store after a send and apply them to the open chat.
+// presage commits sent messages to the local store before returning from the send call,
+// so this is immediately consistent without waiting for the SyncMessage echo.
+async fn reload_chat<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    chat: &mut Option<ChatState>,
+) {
+    if let Ok((msgs, rxns)) = signal::load_messages_and_reactions(manager, thread).await {
+        if let Some(c) = chat {
+            c.messages = msgs;
+            c.reactions = rxns;
+        }
+    }
+}
+
 async fn execute_cmd<S: Store>(
     app: &mut App,
     manager: &mut Manager<S, Registered>,
@@ -657,7 +671,7 @@ async fn execute_cmd<S: Store>(
             if !trimmed.is_empty() {
                 match parse_slash_cmd(trimmed) {
                     Some(cmd) => {
-                        if cmd.def().needs_selection && quote_info.is_none() {
+                        if cmd.needs_selection() && quote_info.is_none() {
                             if let Some(chat) = &mut app.chat {
                                 chat.autocomplete_hint = Some(format!(
                                     "/{} requires a selected message — Shift+↑ to select",
@@ -685,11 +699,7 @@ async fn execute_cmd<S: Store>(
                                                 })
                                                 .unwrap_or(false);
                                             signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
-                                            if let Ok(rxns) = signal::load_reactions(manager, &thread).await {
-                                                if let Some(chat) = &mut app.chat {
-                                                    chat.reactions = rxns;
-                                                }
-                                            }
+                                            reload_chat(manager, &thread, &mut app.chat).await;
                                         }
                                     }
                                 }
@@ -697,15 +707,7 @@ async fn execute_cmd<S: Store>(
                                     if let Some((q_ts, q_author, q_text)) = quote_info {
                                         signal::send_reply(manager, &thread, body.to_string(), q_ts, q_author, q_text).await?;
                                     }
-                                    // Reload immediately — presage writes the sent message to the
-                                    // local store before returning, so it's available without
-                                    // waiting for the SyncMessage echo (which may arrive on a
-                                    // dying stream).
-                                    if let Ok(msgs) = signal::load_messages(manager, &thread).await {
-                                        if let Some(chat) = &mut app.chat {
-                                            chat.messages = msgs;
-                                        }
-                                    }
+                                    reload_chat(manager, &thread, &mut app.chat).await;
                                 }
                                 SlashCmd::Reply(_) => {} // empty body, no-op
                             }
@@ -713,12 +715,7 @@ async fn execute_cmd<S: Store>(
                     }
                     None => {
                         signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
-                        // Reload immediately — see comment above.
-                        if let Ok(msgs) = signal::load_messages(manager, &thread).await {
-                            if let Some(chat) = &mut app.chat {
-                                chat.messages = msgs;
-                            }
-                        }
+                        reload_chat(manager, &thread, &mut app.chat).await;
                     }
                 }
             }
