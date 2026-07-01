@@ -331,6 +331,9 @@ fn chat_status_bar(app: &App) -> String {
             return format!("  [{}]  {}  ·  {}  |  /reply <text>↵   Shift+↑↓   Esc deselect", pos, sender, ts);
         }
     }
+    if let Some(hint) = &chat.autocomplete_hint {
+        return format!("  Tab:  {}", hint);
+    }
     "  ←→↑↓ cursor   PgUp/PgDn scroll   Shift+↑ select   Esc back   Enter send   Shift+Enter newline".to_string()
 }
 

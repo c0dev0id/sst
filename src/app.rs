@@ -27,10 +27,12 @@ pub struct ChatState {
     pub scroll: usize,
     pub viewport_height: u16,
     pub input: String,
-    pub cursor: usize,                   // byte offset into `input`
-    pub selected_message: Option<usize>, // index into `messages`
-    pub delivered: HashSet<u64>,         // timestamps of our messages confirmed delivered
-    pub read: HashSet<u64>,              // timestamps of our messages confirmed read
+    pub cursor: usize,                       // byte offset into `input`
+    pub selected_message: Option<usize>,     // index into `messages`
+    pub delivered: HashSet<u64>,             // timestamps of our messages confirmed delivered
+    pub read: HashSet<u64>,                  // timestamps of our messages confirmed read
+    pub tab_pressed: bool,                   // true if the last keypress was Tab
+    pub autocomplete_hint: Option<String>,   // shown on status bar after double-Tab
 }
 
 pub enum AppCmd {
@@ -75,6 +77,8 @@ impl App {
             selected_message: None,
             delivered,
             read,
+            tab_pressed: false,
+            autocomplete_hint: None,
         });
         self.view = View::ChatWindow;
     }
@@ -142,6 +146,8 @@ impl App {
             if has_selection {
                 if let Some(chat) = &mut self.chat {
                     chat.selected_message = None;
+                    chat.tab_pressed = false;
+                    chat.autocomplete_hint = None;
                 }
             } else {
                 self.view = View::ChatList;
@@ -151,6 +157,13 @@ impl App {
         }
 
         let chat = self.chat.as_mut()?;
+
+        // Reset autocomplete state on any key that isn't Tab.
+        if key.code != KeyCode::Tab {
+            chat.tab_pressed = false;
+            chat.autocomplete_hint = None;
+        }
+
         match key.code {
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if !chat.messages.is_empty() {
@@ -226,6 +239,26 @@ impl App {
                 chat.cursor += c.len_utf8();
                 None
             }
+            KeyCode::Tab => {
+                let was_tab = chat.tab_pressed;
+                chat.tab_pressed = true;
+                // Field borrow splitting: self.threads is separate from self.chat.
+                let threads = &self.threads;
+                if let Some((start, end, candidates)) =
+                    completion_candidates(&chat.input, chat.cursor, threads)
+                {
+                    if candidates.len() == 1 {
+                        let rep = candidates[0].clone();
+                        chat.input.replace_range(start..end, &rep);
+                        chat.cursor = start + rep.len();
+                        chat.autocomplete_hint = None;
+                        chat.tab_pressed = false;
+                    } else if was_tab {
+                        chat.autocomplete_hint = Some(candidates.join("  "));
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -261,6 +294,53 @@ impl App {
             }
         }
     }
+}
+
+// ── Tab completion ────────────────────────────────────────────────────────────
+
+/// Returns (replace_start_byte, replace_end_byte, candidates) or None.
+///
+/// Slash commands: triggered when input[..cursor] starts with '/' and has no space.
+/// @mentions:      triggered when a bare '@' token ends at cursor.
+fn completion_candidates(
+    input: &str,
+    cursor: usize,
+    threads: &[ThreadEntry],
+) -> Option<(usize, usize, Vec<String>)> {
+    let before = &input[..cursor.min(input.len())];
+
+    if before.starts_with('/') && !before.contains(' ') {
+        let partial = &before[1..];
+        // (name, needs_trailing_space_for_arg)
+        let commands = [("quit", false), ("react", true), ("reply", true)];
+        let mut candidates: Vec<String> = commands
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(partial))
+            .map(|(cmd, has_arg)| if *has_arg { format!("/{} ", cmd) } else { format!("/{}", cmd) })
+            .collect();
+        candidates.sort();
+        if candidates.is_empty() { return None; }
+        return Some((0, cursor, candidates));
+    }
+
+    if let Some(at_pos) = before.rfind('@') {
+        let partial = &before[at_pos + 1..];
+        if !partial.contains(' ') {
+            let partial_lower = partial.to_lowercase();
+            let mut candidates: Vec<String> = threads
+                .iter()
+                .filter(|t| matches!(t.thread, Thread::Contact(_)))
+                .filter(|t| t.name != "Note to Self")
+                .filter(|t| t.name.to_lowercase().starts_with(&partial_lower))
+                .map(|t| format!("@{} ", t.name))
+                .collect();
+            candidates.sort();
+            if candidates.is_empty() { return None; }
+            return Some((at_pos, cursor, candidates));
+        }
+    }
+
+    None
 }
 
 // ── Cursor movement helpers ───────────────────────────────────────────────────
