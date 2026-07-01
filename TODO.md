@@ -14,8 +14,15 @@ Stream reconnect, CLI flags (--send, --read, --read-stream, --contact-list), and
 - [ ] Unread visual treatment beyond `*` prefix (bold/color — open design question)
 
 ### Reactions
-- [ ] `/react <emoji>` slash command — Tab-completes but doesn't send yet
-- [ ] Reactions rendered inline: `[1x❤, 3x👋]` appended to last line of message body
+- [ ] `/react <shortcode|emoji>` slash command — sends a reaction to the selected message
+  - `/react wave` → resolves via `emojis::get_by_shortcode("wave")` → 👋 (add `emojis` crate)
+  - `/react ❤️` → direct emoji, passed through as-is
+  - `/react` (no arg) → show existing reactions on the selected message on the status bar
+  - `remove` flag: reacting with the same emoji again should toggle it off (`remove: true`)
+  - Proto: `DataMessage { reaction: Some(Reaction { emoji, remove, target_author_aci, target_sent_timestamp }), .. }`
+- [ ] Reactions rendered inline: `[1x❤️, 3x👋]` appended to last line of message body
+  - Reaction messages arrive as `DataMessage` with `reaction` set and empty body — currently filtered out by `load_messages`
+  - Load separately, group by `target_sent_timestamp + emoji`, count, attach to matching message
 
 ### File transfer
 - [ ] `/upload <path>` slash command: send a local file into the open chat
