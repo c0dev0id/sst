@@ -155,6 +155,12 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
     if contact_list {
         eprintln!("Syncing contacts… (this can take a few seconds)");
         signal::sync_contacts(&mut manager, &mut state).await?;
+        eprintln!("Fetching missing profiles…");
+        let resolved = signal::fetch_missing_profiles(&mut manager).await
+            .unwrap_or_default();
+        if !resolved.is_empty() {
+            eprintln!("Resolved {} profile(s).", resolved.len());
+        }
         if let Some(own_uuid) = state.own_aci {
             println!("{} Note to Self", own_uuid);
         }
@@ -162,7 +168,9 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
         for entry in &contacts {
             match &entry.thread {
                 Thread::Contact(sid) => {
-                    println!("{} {}", sid.raw_uuid(), entry.name);
+                    let uuid = sid.raw_uuid();
+                    let name = resolved.get(&uuid).map(String::as_str).unwrap_or(&entry.name);
+                    println!("{} {}", uuid, name);
                 }
                 Thread::Group(key) => {
                     let hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();

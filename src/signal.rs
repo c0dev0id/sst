@@ -302,6 +302,46 @@ pub async fn list_all_contacts<S: Store>(
     Ok((contact_entries, contacts_len))
 }
 
+/// For contacts with no name and no phone number, try to fetch their Signal profile
+/// using the profile key cached in the store. Returns a map of uuid → display name
+/// for every contact that was successfully resolved.
+///
+/// Fetched profiles are cached by presage so subsequent calls return instantly.
+pub async fn fetch_missing_profiles<S: Store>(
+    manager: &mut Manager<S, Registered>,
+) -> anyhow::Result<HashMap<Uuid, String>> {
+    let nameless: Vec<presage::model::contacts::Contact> = {
+        let mut v = Vec::new();
+        for result in manager.store().contacts().await? {
+            let c = result?;
+            if c.name.is_empty() && c.phone_number.is_none() {
+                v.push(c);
+            }
+        }
+        v
+    };
+
+    let mut resolved = HashMap::new();
+    for contact in nameless {
+        let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
+        let Ok(Some(key)) = manager.store().profile_key(&service_id).await else {
+            continue;
+        };
+        match manager.retrieve_profile_by_uuid(contact.uuid, key).await {
+            Ok(profile) => {
+                if let Some(name) = &profile.name {
+                    let s = name.to_string();
+                    if !s.is_empty() {
+                        resolved.insert(contact.uuid, s);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("profile fetch failed for {}: {e}", contact.uuid),
+        }
+    }
+    Ok(resolved)
+}
+
 fn contact_display_name(contact: &presage::model::contacts::Contact) -> String {
     if !contact.name.is_empty() {
         return contact.name.clone();

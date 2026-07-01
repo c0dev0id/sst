@@ -41,6 +41,4 @@ Stream reconnect, CLI flags (--send, --read, --read-stream, --contact-list), and
 
 ### Infrastructure
 - [ ] `d` key on chat list to delete thread (with confirmation), per spec
-- [ ] `--contact-list`: after printing, walk UUID-only contacts and fetch missing profiles
-  - For each contact where `contact_display_name` falls back to a UUID: call `manager.store().profile_key(service_id)` — if `Some(key)`, call `manager.retrieve_profile_by_uuid(uuid, key)` (caches in store); re-print with resolved name
-  - `retrieve_profile_by_uuid` checks its own cache first, so calling it in a loop is safe
+- [x] `--contact-list`: after printing, walk UUID-only contacts and fetch missing profiles — done
