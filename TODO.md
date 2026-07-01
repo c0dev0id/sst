@@ -41,7 +41,6 @@ Stream reconnect, CLI flags (--send, --read, --read-stream, --contact-list), and
 
 ### Infrastructure
 - [ ] `d` key on chat list to delete thread (with confirmation), per spec
-- [ ] `--contact-fullsync` CLI flag: one-time profile fetch for contacts that have a UUID but no name
-  - Walk `manager.store().contacts()`, skip entries where `contact_display_name` resolves to something better than a UUID
-  - For each UUID-only contact: call `manager.store().profile_key(service_id)` — if `Some(key)`, call `manager.retrieve_profile_by_uuid(uuid, key)` which caches the result in the store; the next `contacts()` iteration will then return the name
-  - Best run once after `--relink`; names persist in the SQLite store so no need to repeat
+- [ ] `--contact-list`: after printing, walk UUID-only contacts and fetch missing profiles
+  - For each contact where `contact_display_name` falls back to a UUID: call `manager.store().profile_key(service_id)` — if `Some(key)`, call `manager.retrieve_profile_by_uuid(uuid, key)` (caches in store); re-print with resolved name
+  - `retrieve_profile_by_uuid` checks its own cache first, so calling it in a loop is safe
