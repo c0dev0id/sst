@@ -1,191 +1,152 @@
 # simple-signal-tui
 
-Terminal UI client for Signal.
+Terminal UI client for Signal, written in Rust.
 
-**Features:** QR code device linking · typing notifications · read receipts · message reactions · quoted replies · @mention autocomplete · slash command autocomplete
-
-**Stack:** Rust · [presage](https://github.com/whisperfish/presage) · [ratatui](https://github.com/ratatui/ratatui)
+**Stack:** [presage](https://github.com/whisperfish/presage) · [ratatui](https://github.com/ratatui/ratatui) · [tokio](https://tokio.rs)
 
 ---
 
-## Auth Flow
+## Setup
 
-On startup:
+```
+sst [--relink] [--data-dir <path>]
+```
 
-1. Check for a stored auth token (presage's SQLite store).
-2. If absent (or `--relink` is passed), call `Manager::link_secondary_device()` — this yields a provisioning URL which is rendered as a QR code in the terminal. Wait for it to be scanned in the Signal mobile app.
-3. On success, presage returns a fully registered `Manager`. Proceed to the Chat List.
+On first run (or with `--relink`), a QR code is printed in the terminal. Scan it from **Signal → Settings → Linked Devices → Link New Device**. On success the app proceeds to the Chat List.
+
+Data (SQLite store, session keys, cached contacts) lives in `~/.local/share/sst` by default.
 
 ---
 
 ## Chat List
 
-One line per conversation, sorted most-recent-first. Unread chats are marked with `*`.
+One line per conversation, sorted most-recent-first. Unread threads are prefixed with `*`.
 
-**Format:**
-- 1:1: `<Full Name>: <truncated last message preview>`
-  - `Florian Heß: This is a test message that gets truncated on the right...`
-- Group: `<Group Name>: <truncated last message preview>`
-  - `Weekend Plans: This is the last message, which is also truncated...`
+```
+* Alice Wagner: Hey, are you free tonight?
+  Bob Richter: The meeting is pushed to Friday
+  Family Group: See you all Sunday!
+```
 
-**Keys:**
+Lines are truncated with `…` when they exceed the terminal width.
 
 | Key | Action |
 |-----|--------|
-| ↑ / ↓ | Navigate chats |
-| PgUp / PgDn | Scroll list |
-| Return | Open selected chat |
-| `d` | Delete chat (confirmation required) |
+| ↑ / ↓ | Navigate |
+| PgUp / PgDn | Scroll |
+| Enter | Open chat |
+| `n` | Open contact browser (new chat) |
 | `Q` | Quit |
 
-The list scrolls automatically when the cursor reaches the screen edge, keeping one additional entry visible above and below the selection at all times.
+---
+
+## Contact Browser
+
+Press `n` from the Chat List to open a full-screen picker of all synced contacts and known groups, regardless of message history. Useful for starting a conversation with someone you haven't messaged yet, or opening a group that went quiet before the device was linked.
+
+```
+  Alice Wagner
+  Bob Richter
+  Carol Brauer
+─── groups ────────────────────────────────
+  Family Group
+  Weekend Plans
+```
+
+| Key | Action |
+|-----|--------|
+| ↑ / ↓ | Navigate |
+| PgUp / PgDn | Scroll |
+| Enter | Open chat |
+| Esc / q | Back to Chat List |
 
 ---
 
 ## Chat Window
 
-Layout (top to bottom):
-
 ```
-┌─────────────────────────────────┐
-│  Florian Heß                    │  ← header: contact or group name
-├─────────────────────────────────┤
-│                                 │
-│  * Florian Heß:                 │  ← message area (scrollable)
-│    Hello people!                │
-│                                 │
-│  * Andreas Schirra:             │
-│    Hi Florian!                  │
-│                                 │
-├─────────────────────────────────┤
-│  Florian Heß is typing...       │  ← status bar
-├─────────────────────────────────┤
-│  >                              │  ← input bar
-└─────────────────────────────────┘
+ Alice Wagner                               ← header
+────────────────────────────────────────────
+ Alice Wagner  09:14                        ← sender block
+   Hey, are you free tonight?
+   I was thinking dinner around 7?
+
+ You  09:31
+   Sure, sounds good!  ✓✓
+
+── 2026-06-28 14:00 ──                      ← hour gap separator
+
+ Alice Wagner  14:02
+   > You:                                   ← quoted reply
+   > Sure, sounds good!
+   Perfect, see you then!
+────────────────────────────────────────────
+  ←→↑↓ cursor  PgUp/PgDn scroll  ...        ← status bar
+────────────────────────────────────────────
+ > |                                        ← input bar
 ```
 
-**Keys:**
+Long lines are word-wrapped to the terminal width.
+
+### Message area
 
 | Key | Action |
 |-----|--------|
-| PgUp / PgDn | Scroll message area |
-| Shift+↑ | Activate selection / move selection up (toward older messages) |
-| Shift+↓ | Move selection down (toward newer messages); no-op if no selection |
-| Escape | Clear selection (first press); return to Chat List (second press) |
+| PgUp / PgDn | Scroll up / down |
+| Shift+↑ | Select most recent message / move selection toward older |
+| Shift+↓ | Move selection toward newer (no-op when at newest) |
+| Esc | Clear selection (first press); return to Chat List (second press) |
 
----
+Consecutive messages from the same sender are grouped under one header block. An `── date time ──` separator is inserted when the gap between messages exceeds one hour.
 
-### Message Area
-
-Oldest messages at the top, newest at the bottom. Consecutive messages from the same sender are grouped under one header.
-
-```
-* Florian Heß:
-  Hello people!
-* Andreas Schirra:
-  Hi Florian!
-* Stefan Hagen:
-  Messages can be long and
-  contain line breaks
-* Stefan Hagen:
-  Messages with reactions have them appended inline. [1x❤, 3x👋]
-* Stefan Hagen:
-  > Florian Heß:
-  > Hello people!
-  Replies quote the original with a > prefix.
-* Andreas Schirra:
-  > Stefan Hagen:
-  > Replies will quote the original message
-  Nested replies do NOT include the grandparent quote — one level only.
-```
-
-Own messages use the same format; the username is colored to distinguish it.
-
-Sent messages show a read receipt indicator:
+Own sent messages show a receipt indicator on the last line:
 - `✓` — delivered
-- `✓✓` — seen
+- `✓✓` — read
 
-**Timestamps** appear as inline separators when the gap between consecutive messages exceeds one hour:
+### Input bar
 
-```
-── 2026-06-26 09:00 ──
-* Florian Heß:
-  Good morning!
-── 2026-06-26 14:35 ──
-* Stefan Hagen:
-  Afternoon everyone
-```
+Always focused. Grows vertically as content requires (no line cap). A block cursor shows the insert position.
 
-**Unread boundary** is marked with a separator at the first unread message:
+| Key | Action |
+|-----|--------|
+| Enter | Send message |
+| Shift+Enter | Insert newline |
+| ← / → | Move cursor left / right |
+| ↑ / ↓ | Move cursor up / down (multi-line) |
+| Backspace | Delete character left of cursor |
+| Tab | Complete slash command or @mention (unique match) |
+| Tab Tab | Show all completion candidates on status bar |
+| Esc | Clear selection / return to Chat List |
 
-```
-── new ──
-* Florian Heß:
-  You missed this
-```
+### Slash commands
 
-**Message selection** (Shift+↑/↓) scrolls automatically when the cursor reaches the screen edge, keeping one additional message visible above and below the selection. ESC clears the selection entirely; the next Shift+↑ starts fresh at the most recent message.
+`/quit` exits the app from within a chat.
 
-When a message is selected, the status bar shows full message metadata (sender, timestamp, delivery status) instead of the typing notification.
+`/reply <text>` sends `<text>` as a quoted reply to the currently selected message (requires Shift+↑ to select first). The quoted author and first line are shown inline above the reply body.
 
----
+Tab-completion applies to slash commands: `/r` + Tab completes to `/reply ` when it is the only match; `/` + Tab Tab lists all commands on the status bar.
 
-### Status Bar
+### @mention completion
 
-Normally shows typing notifications:
-
-| Scenario | Text |
-|----------|------|
-| One person | `Florian Heß is typing…` |
-| Two people | `Florian and Andreas are typing…` |
-| Three or more | `Florian, Andreas, and 3 more are typing…` |
-
-Temporarily overridden by:
-- Autocomplete candidates (double-Tab on `@mention` or `/command`)
-- Message metadata when a message is selected
-
-Restores to its normal content when the next character is typed or Backspace is pressed.
+`@ali` + Tab completes to `@Alice Wagner ` when it is the only match among known contacts. `@` + Tab Tab lists all candidates on the status bar.
 
 ---
 
-### Input Bar
+## Status bar
 
-Always focused. Grows vertically as needed (no line cap).
+Shows key hints by default. Overridden by autocomplete candidates after a double-Tab (clears on the next keystroke or Backspace). While a message is selected, shows sender, timestamp, and position:
 
-| Input | Action |
-|-------|--------|
-| Return | Send message |
-| Shift+Return | Insert newline |
-| Escape | Clear selection / return to Chat List |
-| `@<partial>` Tab | Complete username (unique match; excludes self) |
-| `@<partial>` Tab Tab | Show all matches on status bar |
-| Shift+↑ | Activate message selection at most recent message |
-
-In a 1:1 chat, `@`Tab always completes the other participant.
+```
+  [3/17]  Alice Wagner  ·  2026-06-28 09:14  |  /reply <text>↵   Shift+↑↓   Esc deselect
+```
 
 ---
 
-### Slash Commands (requires message selection)
+## Building
 
-| Command | Action |
-|---------|--------|
-| `/reply <text>` | Send `<text>` as a reply to the selected message |
-| `/react <emoji-key>` | React to the selected message |
-| `/react` | Show existing reactions on the selected message |
-
-Autocomplete follows the same Tab logic as `@mentions` — single Tab completes on a unique match, double Tab lists all candidates on the status bar.
-
-**Supported reaction keys:**
-
-| Key | Emoji |
-|-----|-------|
-| `heart` | ❤️ |
-| `thumbs-up` | 👍 |
-| `wave` | 👋 |
-| `laugh` | 😄 |
-
----
-
-## Open Questions
-
-- **Chat list unread:** Visual treatment beyond `*` prefix (bold? color?).
+```sh
+make          # debug build  (target/debug/sst)
+make release  # release build
+make install  # install release build to ~/.bin/sst
+make test     # run test suite
+```
