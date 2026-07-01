@@ -11,16 +11,16 @@ path = "src/main.rs"
 presage = { git = "https://github.com/whisperfish/presage", rev = "c363731038acf176ab6b5ee0600d7de85f8a2da8" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "c363731038acf176ab6b5ee0600d7de85f8a2da8", default-features = false }
 
-emojis = "0.6"
+emojis = "0.9"
 anyhow = "1.0"
 serde_json = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 directories = "6.0"
 futures = "0.3"
 qr2term = "0.3"
-ratatui = "0.29"
+ratatui = "0.30"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
