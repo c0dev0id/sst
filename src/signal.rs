@@ -302,19 +302,25 @@ pub async fn list_all_contacts<S: Store>(
     Ok((contact_entries, contacts_len))
 }
 
-/// For contacts with no name and no phone number, try to fetch their Signal profile
+/// True for contacts that have no usable display name — no name field and no phone number.
+/// These are candidates for a Signal profile fetch.
+fn needs_profile_fetch(contact: &presage::model::contacts::Contact) -> bool {
+    contact.name.is_empty() && contact.phone_number.is_none()
+}
+
+/// For contacts with no usable display name, try to fetch their Signal profile
 /// using the profile key cached in the store. Returns a map of uuid → display name
 /// for every contact that was successfully resolved.
-///
-/// Fetched profiles are cached by presage so subsequent calls return instantly.
 pub async fn fetch_missing_profiles<S: Store>(
     manager: &mut Manager<S, Registered>,
 ) -> anyhow::Result<HashMap<Uuid, String>> {
-    let nameless: Vec<presage::model::contacts::Contact> = {
+    // Collect first: contacts() borrows &store immutably; the fetch loop below
+    // needs &mut manager, which conflicts with holding the iterator.
+    let nameless = {
         let mut v = Vec::new();
         for result in manager.store().contacts().await? {
             let c = result?;
-            if c.name.is_empty() && c.phone_number.is_none() {
+            if needs_profile_fetch(&c) {
                 v.push(c);
             }
         }
