@@ -429,14 +429,30 @@ fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
 
 /// Returns (replace_start_byte, replace_end_byte, candidates) or None.
 ///
-/// Slash commands: triggered when input[..cursor] starts with '/' and has no space.
-/// @mentions:      triggered when a bare '@' token ends at cursor.
+/// Slash commands:   triggered when input[..cursor] starts with '/' and has no space.
+/// /react <arg>:     triggered when input[..cursor] starts with "/react " and the rest is ASCII.
+/// @mentions:        triggered when a bare '@' token ends at cursor.
 fn completion_candidates(
     input: &str,
     cursor: usize,
     threads: &[ThreadEntry],
 ) -> Option<(usize, usize, Vec<String>)> {
     let before = &input[..cursor.min(input.len())];
+
+    // /react <shortcode> argument completion — must come before the command-name block
+    // because "/react w" starts with '/' and contains a space, so it won't reach below.
+    if let Some(rest) = before.strip_prefix("/react ") {
+        if !rest.is_empty() && rest.is_ascii() {
+            let partial = rest.to_lowercase();
+            let mut candidates: Vec<String> = emojis::iter()
+                .flat_map(|e| e.shortcodes().filter(|s| s.starts_with(partial.as_str())).map(str::to_string))
+                .collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+            if candidates.is_empty() { return None; }
+            return Some(("/react ".len(), cursor, candidates));
+        }
+    }
 
     if before.starts_with('/') && !before.contains(' ') {
         let partial = &before[1..];
