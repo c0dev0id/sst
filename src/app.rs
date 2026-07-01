@@ -203,6 +203,10 @@ impl App {
                 None
             }
             KeyCode::Enter => {
+                if chat.input.trim() == "/quit" {
+                    self.quit = true;
+                    return None;
+                }
                 if !chat.input.trim().is_empty() {
                     Some(AppCmd::SendMessage)
                 } else {
