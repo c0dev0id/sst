@@ -132,7 +132,10 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
     }
 
     if contact_list {
-        signal::sync(&mut manager, &mut state).await?;
+        signal::sync_contacts(&mut manager, &mut state).await?;
+        if let Some(own_uuid) = state.own_aci {
+            println!("{} Note to Self", own_uuid);
+        }
         let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
         for entry in &contacts {
             match &entry.thread {

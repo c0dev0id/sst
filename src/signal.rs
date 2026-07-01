@@ -107,6 +107,51 @@ async fn drain_backlog<S: Store>(
     Ok(())
 }
 
+/// Drain the pending queue (discarding message content), request a fresh
+/// contact list from the primary device, and wait for it to arrive.
+/// Used for --contact-list mode; much faster than a full sync.
+pub async fn sync_contacts<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    state: &mut SyncState,
+) -> anyhow::Result<()> {
+    let own_aci = manager.whoami().await?.aci;
+    state.own_aci = Some(own_aci);
+
+    let mut stream = Box::pin(
+        manager
+            .receive_messages()
+            .await
+            .context("failed to start receive stream")?,
+    );
+
+    // Drain the queue without processing messages.
+    // If Contacts arrives here (primary pushed it proactively), we're done.
+    loop {
+        match stream.next().await {
+            Some(Received::QueueEmpty) => break,
+            Some(Received::Contacts) => return Ok(()),
+            Some(_) | None => {}
+        }
+    }
+
+    // Ask the primary device to push an updated contact list.
+    if let Err(e) = manager.request_contacts().await {
+        tracing::warn!("request_contacts: {e}");
+    }
+
+    // Wait up to 10 s for the Contacts event.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event, Received::Contacts) {
+                break;
+            }
+        }
+    })
+    .await;
+
+    Ok(())
+}
+
 /// Drain the message queue and drop the stream. Used for --list mode.
 pub async fn sync<S: Store>(
     manager: &mut Manager<S, Registered>,
