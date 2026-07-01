@@ -70,7 +70,7 @@ async fn drain_backlog<S: Store>(
     while let Some(event) = stream.next().await {
         match event {
             Received::QueueEmpty => {
-                eprintln!("Sync complete ({count} messages).");
+                tracing::info!("sync complete ({count} messages)");
                 break;
             }
             Received::Content(content) => {
@@ -88,7 +88,7 @@ async fn drain_backlog<S: Store>(
                     Err(_) => {}
                 }
             }
-            Received::Contacts => eprintln!("Contact list synced."),
+            Received::Contacts => tracing::info!("contact list synced"),
         }
     }
 
