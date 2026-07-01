@@ -245,10 +245,6 @@ impl App {
                 None
             }
             KeyCode::Enter => {
-                if chat.input.trim() == "/quit" {
-                    self.quit = true;
-                    return None;
-                }
                 if !chat.input.trim().is_empty() {
                     Some(AppCmd::SendMessage)
                 } else {
@@ -389,6 +385,55 @@ impl App {
     }
 }
 
+// ── Slash command registry ───────────────────────────────────────────────────
+
+struct SlashCmdDef {
+    name: &'static str,
+    needs_selection: bool, // command requires a highlighted message as context
+    has_arg: bool,         // command takes text from the input bar
+}
+
+const SLASH_COMMANDS: &[SlashCmdDef] = &[
+    SlashCmdDef { name: "quit",  needs_selection: false, has_arg: false },
+    SlashCmdDef { name: "react", needs_selection: true,  has_arg: true  },
+    SlashCmdDef { name: "reply", needs_selection: true,  has_arg: true  },
+];
+
+enum SlashCmd<'a> {
+    Quit,
+    React(&'a str), // emoji/shortcode arg, possibly empty (empty = show reactions)
+    Reply(&'a str), // message body, possibly empty
+}
+
+impl SlashCmd<'_> {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Quit     => "quit",
+            Self::React(_) => "react",
+            Self::Reply(_) => "reply",
+        }
+    }
+
+    fn def(&self) -> &'static SlashCmdDef {
+        let n = self.name();
+        SLASH_COMMANDS.iter().find(|d| d.name == n)
+            .expect("SlashCmd variant missing from SLASH_COMMANDS")
+    }
+}
+
+fn parse_slash_cmd(input: &str) -> Option<SlashCmd<'_>> {
+    let s = input.trim().strip_prefix('/')?;
+    let (name, arg) = s.split_once(' ')
+        .map(|(n, a)| (n, a.trim()))
+        .unwrap_or((s, ""));
+    match name {
+        "quit"  => Some(SlashCmd::Quit),
+        "react" => Some(SlashCmd::React(arg)),
+        "reply" => Some(SlashCmd::Reply(arg)),
+        _       => None,
+    }
+}
+
 // ── Reaction helpers ──────────────────────────────────────────────────────────
 
 /// Resolve `/react <arg>` input to an emoji string.
@@ -415,9 +460,9 @@ fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
 
 /// Returns (replace_start_byte, replace_end_byte, candidates) or None.
 ///
-/// Slash commands:   triggered when input[..cursor] starts with '/' and has no space.
-/// /react <arg>:     triggered when input[..cursor] starts with "/react " and the rest is ASCII.
-/// @mentions:        triggered when a bare '@' token ends at cursor.
+/// Slash command names: triggered when input[..cursor] starts with '/' with no space.
+/// /react <arg>:        triggered when input starts with "/react " and the rest is ASCII.
+/// @mentions:           triggered when a bare '@' token ends at cursor.
 fn completion_candidates(
     input: &str,
     cursor: usize,
@@ -442,12 +487,10 @@ fn completion_candidates(
 
     if before.starts_with('/') && !before.contains(' ') {
         let partial = &before[1..];
-        // (name, needs_trailing_space_for_arg)
-        let commands = [("quit", false), ("react", true), ("reply", true)];
-        let mut candidates: Vec<String> = commands
+        let mut candidates: Vec<String> = SLASH_COMMANDS
             .iter()
-            .filter(|(cmd, _)| cmd.starts_with(partial))
-            .map(|(cmd, has_arg)| if *has_arg { format!("/{} ", cmd) } else { format!("/{}", cmd) })
+            .filter(|d| d.name.starts_with(partial))
+            .map(|d| if d.has_arg { format!("/{} ", d.name) } else { format!("/{}", d.name) })
             .collect();
         candidates.sort();
         if candidates.is_empty() { return None; }
@@ -610,46 +653,69 @@ async fn execute_cmd<S: Store>(
 
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                if let Some(react_arg) = trimmed.strip_prefix("/react").map(str::trim) {
-                    if react_arg.is_empty() {
-                        if let Some((target_ts, _, _)) = quote_info {
+                match parse_slash_cmd(trimmed) {
+                    Some(cmd) => {
+                        if cmd.def().needs_selection && quote_info.is_none() {
                             if let Some(chat) = &mut app.chat {
-                                let hint = reaction_hint(&chat.reactions, target_ts);
-                                chat.autocomplete_hint = Some(hint);
+                                chat.autocomplete_hint = Some(format!(
+                                    "/{} requires a selected message — Shift+↑ to select",
+                                    cmd.name()
+                                ));
                             }
-                        }
-                    } else if let Some((target_ts, target_author, _)) = quote_info {
-                        if let Some(emoji) = resolve_emoji(react_arg) {
-                            let remove = app.own_aci
-                                .and_then(|u| {
-                                    app.chat.as_ref()?.reactions.get(&target_ts)?.get(&emoji)
-                                        .map(|s| s.contains(u.as_bytes()))
-                                })
-                                .unwrap_or(false);
-                            signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
-                            if let Ok(rxns) = signal::load_reactions(manager, &thread).await {
-                                if let Some(chat) = &mut app.chat {
-                                    chat.reactions = rxns;
+                        } else {
+                            match cmd {
+                                SlashCmd::Quit => { app.quit = true; }
+                                SlashCmd::React(arg) if arg.is_empty() => {
+                                    if let Some((target_ts, _, _)) = quote_info {
+                                        if let Some(chat) = &mut app.chat {
+                                            let hint = reaction_hint(&chat.reactions, target_ts);
+                                            chat.autocomplete_hint = Some(hint);
+                                        }
+                                    }
                                 }
+                                SlashCmd::React(arg) => {
+                                    if let Some((target_ts, target_author, _)) = quote_info {
+                                        if let Some(emoji) = resolve_emoji(arg) {
+                                            let remove = app.own_aci
+                                                .and_then(|u| {
+                                                    app.chat.as_ref()?.reactions.get(&target_ts)?.get(&emoji)
+                                                        .map(|s| s.contains(u.as_bytes()))
+                                                })
+                                                .unwrap_or(false);
+                                            signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
+                                            if let Ok(rxns) = signal::load_reactions(manager, &thread).await {
+                                                if let Some(chat) = &mut app.chat {
+                                                    chat.reactions = rxns;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                SlashCmd::Reply(body) if !body.is_empty() => {
+                                    if let Some((q_ts, q_author, q_text)) = quote_info {
+                                        signal::send_reply(manager, &thread, body.to_string(), q_ts, q_author, q_text).await?;
+                                    }
+                                    // Reload immediately — presage writes the sent message to the
+                                    // local store before returning, so it's available without
+                                    // waiting for the SyncMessage echo (which may arrive on a
+                                    // dying stream).
+                                    if let Ok(msgs) = signal::load_messages(manager, &thread).await {
+                                        if let Some(chat) = &mut app.chat {
+                                            chat.messages = msgs;
+                                        }
+                                    }
+                                }
+                                SlashCmd::Reply(_) => {} // empty body, no-op
                             }
                         }
                     }
-                } else {
-                    if let Some(reply_body) = trimmed.strip_prefix("/reply").map(str::trim) {
-                        if !reply_body.is_empty() {
-                            if let Some((q_ts, q_author, q_text)) = quote_info {
-                                signal::send_reply(manager, &thread, reply_body.to_string(), q_ts, q_author, q_text).await?;
-                            }
-                        }
-                    } else {
+                    None => {
                         signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
-                    }
-                    // Reload immediately — presage writes the sent message to the local
-                    // store before returning, so it's available here without waiting for
-                    // the SyncMessage echo (which may arrive on a dying stream).
-                    if let Ok(msgs) = signal::load_messages(manager, &thread).await {
-                        if let Some(chat) = &mut app.chat {
-                            chat.messages = msgs;
+                        // Reload immediately — see comment above.
+                        if let Ok(msgs) = signal::load_messages(manager, &thread).await {
+                            if let Some(chat) = &mut app.chat {
+                                chat.messages = msgs;
+                            }
                         }
                     }
                 }

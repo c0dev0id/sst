@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Slash command dispatch refactored into a single registry (`SLASH_COMMANDS` const + `SlashCmd` enum + `parse_slash_cmd()`); each entry declares `needs_selection` and `has_arg` metadata; commands that require a selection now show an error on the status bar instead of silently doing nothing
+
 ### Added
 - `/react <emoji|shortcode>` slash command: reacts to the selected message; `/react wave` resolves via `emojis` crate shortcode lookup (👋), direct emoji passthrough for non-ASCII input (e.g. `/react ❤️`); sending the same emoji again toggles it off (`remove: true`)
 - `/react` (no argument): shows existing reaction counts for the selected message on the status bar
