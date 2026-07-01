@@ -279,8 +279,9 @@ impl App {
                 chat.tab_pressed = true;
                 // Field borrow splitting: self.threads is separate from self.chat.
                 let threads = &self.threads;
+                let has_selection = chat.selected_message.is_some();
                 if let Some((start, end, candidates)) =
-                    completion_candidates(&chat.input, chat.cursor, threads)
+                    completion_candidates(&chat.input, chat.cursor, threads, has_selection)
                 {
                     if candidates.len() == 1 {
                         let rep = candidates[0].clone();
@@ -467,13 +468,14 @@ fn completion_candidates(
     input: &str,
     cursor: usize,
     threads: &[ThreadEntry],
+    has_selection: bool,
 ) -> Option<(usize, usize, Vec<String>)> {
     let before = &input[..cursor.min(input.len())];
 
     // /react <shortcode> argument completion — must come before the command-name block
     // because "/react w" starts with '/' and contains a space, so it won't reach below.
     if let Some(rest) = before.strip_prefix("/react ") {
-        if !rest.is_empty() && rest.is_ascii() {
+        if has_selection && !rest.is_empty() && rest.is_ascii() {
             let partial = rest.to_lowercase();
             let mut candidates: Vec<String> = emojis::iter()
                 .flat_map(|e| e.shortcodes().filter(|s| s.starts_with(partial.as_str())).map(str::to_string))
@@ -489,7 +491,7 @@ fn completion_candidates(
         let partial = &before[1..];
         let mut candidates: Vec<String> = SLASH_COMMANDS
             .iter()
-            .filter(|d| d.name.starts_with(partial))
+            .filter(|d| d.name.starts_with(partial) && (has_selection || !d.needs_selection))
             .map(|d| if d.has_arg { format!("/{} ", d.name) } else { format!("/{}", d.name) })
             .collect();
         candidates.sort();
