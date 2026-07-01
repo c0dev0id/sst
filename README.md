@@ -142,6 +142,81 @@ Shows key hints by default. Overridden by autocomplete candidates after a double
 
 ---
 
+## CLI Usage
+
+In addition to the TUI, `sst` exposes several non-interactive commands for scripting and automation. All CLI modes share the same SQLite database as the TUI — **do not run them concurrently with `sst` or with each other**, as concurrent writes will corrupt the database.
+
+### List chats
+
+```sh
+sst --list
+```
+
+Syncs new messages, then prints all conversations with a one-line preview to stdout.
+
+### List contacts
+
+```sh
+sst --contact-list
+```
+
+Syncs the contact list from the primary device, then prints `<uuid> <name>` for every known contact and group to stdout. Useful for discovering UUIDs to use with the other CLI commands.
+
+```
+96c9d3f9-fccf-4517-a0a8-f4bf72a63e48 Note to Self
+3fa85f64-5717-4562-b3fc-2c963f66afa6 Alice Wagner
+7c9e6679-7425-40de-944b-e07fc1f90ae7 Bob Richter
+a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 Family Group
+```
+
+Groups are identified by a 64-character hex master key instead of a UUID.
+
+### Send a message
+
+```sh
+echo "Hello!" | sst --send <UUID|HEX>
+printf "Line one\nLine two" | sst --send <UUID|HEX>
+```
+
+Reads the message body from stdin and sends it to the given contact (UUID) or group (64-char hex). Trailing newlines are stripped.
+
+### Read chat history
+
+```sh
+sst --read <UUID|HEX>
+```
+
+Syncs new messages, then prints the full chat history to stdout as JSONL (one JSON object per line):
+
+```json
+{"timestamp":"2026-07-01T09:14:00Z","sender_uuid":"3fa85f64-...","sender_name":"Alice Wagner","body":"Hey!"}
+```
+
+### Stream incoming messages
+
+```sh
+sst --read-stream <UUID|HEX>
+```
+
+Connects to Signal and streams new incoming messages from the given thread to stdout as JSONL. Runs until interrupted. Only messages received after startup are emitted — backlog is silently discarded.
+
+```sh
+# Forward all incoming messages from Alice to a file:
+sst --read-stream 3fa85f64-5717-4562-b3fc-2c963f66afa6 >> alice.jsonl
+```
+
+Note: messages you send via `--send` will not appear on `--read-stream` running on the same device — Signal does not echo sent messages back to the originating device.
+
+### Custom database path
+
+All modes accept `--db <path>` to override the default database location:
+
+```sh
+sst --db /tmp/test.db --relink
+```
+
+---
+
 ## Building
 
 ```sh
