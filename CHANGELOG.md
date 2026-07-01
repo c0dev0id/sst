@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Signal WebSocket stream now reconnects automatically when presage closes it after delivering the first live event; fixes incoming messages not appearing in TUI after the first one, and `--read-stream` not delivering subsequent messages
+
 ### Added
 - Phase 2: Signal data layer — syncs messages, persists discovered contacts (16-byte UUID blocks) and group master keys (32-byte blocks) across sessions
 - Phase 2: `list_threads` builds chat list from `contacts()` + `groups()` presage APIs, falls back to UUID strings for unsaved contacts
