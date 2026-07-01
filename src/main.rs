@@ -175,31 +175,55 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
 
     if let Some(recipient) = read_stream {
         let thread = parse_thread_id(&recipient)?;
-        let mut stream = Box::pin(
-            manager.receive_messages().await.context("failed to start receive stream")?,
-        );
-        // Drain the pending queue without emitting anything.
-        while let Some(event) = stream.next().await {
-            if matches!(event, Received::QueueEmpty) {
-                break;
+        // Tracks timestamps we have already emitted so reconnects don't produce duplicates.
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+        'reconnect: loop {
+            let mut stream = Box::pin(match manager.receive_messages().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("receive_messages failed: {e}, retrying in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue 'reconnect;
+                }
+            });
+
+            // Drain the pending queue silently; reconnect if the stream closes first.
+            loop {
+                match stream.next().await {
+                    Some(Received::QueueEmpty) => break,
+                    Some(_) => {}
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue 'reconnect;
+                    }
+                }
             }
+
+            // Emit new messages for this thread as they arrive.
+            while let Some(event) = stream.next().await {
+                let Received::Content(boxed) = event else { continue };
+                if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) {
+                    continue;
+                }
+                let body = signal::message_body(&boxed);
+                if body.is_empty() {
+                    continue;
+                }
+                let ts = boxed.timestamp();
+                if seen.contains(&ts) {
+                    continue;
+                }
+                seen.insert(ts);
+                let sender_uuid = boxed.metadata.sender.raw_uuid();
+                let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
+                println!("{}", json_line(ts, sender_uuid, &sender_name, &body));
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+
+            // Stream closed — reconnect after a brief pause.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        // Emit new messages for this thread as they arrive.
-        while let Some(event) = stream.next().await {
-            let Received::Content(boxed) = event else { continue };
-            if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) {
-                continue;
-            }
-            let body = signal::message_body(&boxed);
-            if body.is_empty() {
-                continue;
-            }
-            let sender_uuid = boxed.metadata.sender.raw_uuid();
-            let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
-            println!("{}", json_line(boxed.timestamp(), sender_uuid, &sender_name, &body));
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-        }
-        return Ok(());
     }
 
     let stream = signal::connect(&mut manager, &mut state).await?;
