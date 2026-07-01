@@ -17,12 +17,17 @@ Stream reconnect, CLI flags (--send, --read, --read-stream, --contact-list), and
 - [ ] `/react <emoji>` slash command — Tab-completes but doesn't send yet
 - [ ] Reactions rendered inline: `[1x❤, 3x👋]` appended to last line of message body
 
-### File upload
+### File transfer
 - [ ] `/upload <path>` slash command: send a local file into the open chat
   - Images (jpg, png, gif, webp, …) → sent as image attachment
   - Everything else → sent as generic file attachment
   - presage API to check: `DataMessage { attachments: vec![…], … }` + how presage handles CDN upload before send
   - Tab-completion on path argument is nice-to-have but non-trivial
+- [ ] `/download` slash command: download the attachment from the selected message to `$HOME/Downloads/`
+  - Requires an active message selection (Shift+↑)
+  - If the selected message has no attachment, show an error on the status bar
+  - On success, show the saved local path on the status bar
+  - presage API to check: `Manager::get_attachment()` or similar CDN fetch
 
 ### Infrastructure
 - [ ] `d` key on chat list to delete thread (with confirmation), per spec
