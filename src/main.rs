@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main(args: Args) -> anyhow::Result<()> {
     let db_path = args.db.unwrap_or_else(|| {
-        ProjectDirs::from("", "", "simple-signal-tui")
+        ProjectDirs::from("", "", "sst")
             .expect("could not determine data directory")
             .data_dir()
             .join("db")
@@ -261,7 +261,7 @@ async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered
         Manager::link_secondary_device(
             store,
             SignalServers::Production,
-            "simple-signal-tui".to_string(),
+            "sst".to_string(),
             tx,
         ),
         async move {

@@ -1,4 +1,4 @@
-# simple-signal-tui
+# SST (Simple Signal TUI)
 
 Terminal UI client for Signal, written in Rust.
 
