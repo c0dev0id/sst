@@ -478,13 +478,6 @@ fn fmt_ts_long(ts_ms: u64) -> String {
 }
 
 fn format_reactions(map: Option<&HashMap<String, HashSet<[u8; 16]>>>) -> Option<String> {
-    let map = map?;
-    if map.is_empty() {
-        return None;
-    }
-    let mut pairs: Vec<(&str, usize)> = map.iter()
-        .map(|(e, s)| (e.as_str(), s.len()))
-        .collect();
-    pairs.sort_by_key(|(e, _)| *e);
-    Some(format!("[{}]", pairs.iter().map(|(e, c)| format!("{}x{}", c, e)).collect::<Vec<_>>().join(", ")))
+    let map = map.filter(|m| !m.is_empty())?;
+    Some(format!("[{}]", signal::fmt_reaction_pairs(map).join(", ")))
 }

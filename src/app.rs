@@ -35,7 +35,7 @@ pub struct ChatState {
     pub read: HashSet<u64>,                  // timestamps of our messages confirmed read
     pub tab_pressed: bool,                   // true if the last keypress was Tab
     pub autocomplete_hint: Option<String>,   // shown on status bar after double-Tab
-    pub reactions: ReactionMap,              // target_ts → emoji → reactor UUID bytes
+    pub reactions: ReactionMap,
 }
 
 pub enum AppCmd {
@@ -386,12 +386,6 @@ impl App {
             });
         }
         self.threads.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
-
-        if self.chat.as_ref().map(|c| c.thread == update.thread).unwrap_or(false) {
-            if let Some(chat) = &mut self.chat {
-                chat.messages.push(*boxed);
-            }
-        }
     }
 }
 
@@ -410,19 +404,11 @@ fn resolve_emoji(arg: &str) -> Option<String> {
     emojis::get_by_shortcode(arg).map(|e| e.to_string())
 }
 
-/// Format a reaction map entry as a status-bar hint string, e.g. "2x❤️  1x👍".
 fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
-    let Some(map) = reactions.get(&target_ts) else {
+    let Some(map) = reactions.get(&target_ts).filter(|m| !m.is_empty()) else {
         return "(no reactions)".to_string();
     };
-    if map.is_empty() {
-        return "(no reactions)".to_string();
-    }
-    let mut pairs: Vec<(&str, usize)> = map.iter()
-        .map(|(e, s)| (e.as_str(), s.len()))
-        .collect();
-    pairs.sort_by_key(|(e, _)| *e);
-    pairs.iter().map(|(e, c)| format!("{}x{}", c, e)).collect::<Vec<_>>().join("  ")
+    signal::fmt_reaction_pairs(map).join("  ")
 }
 
 // ── Tab completion ────────────────────────────────────────────────────────────
@@ -563,11 +549,10 @@ async fn execute_cmd<S: Store>(
 ) -> anyhow::Result<()> {
     match cmd {
         AppCmd::OpenChat { thread, name } => {
-            let messages = signal::load_messages(manager, &thread).await?;
+            let (messages, reactions) = signal::load_messages_and_reactions(manager, &thread).await?;
             let (delivered, read) = signal::load_receipt_state(manager, &thread)
                 .await
                 .unwrap_or_default();
-            let reactions = signal::load_reactions(manager, &thread).await.unwrap_or_default();
 
             let own_aci = app.own_aci;
             let to_ack: Vec<u64> = messages
@@ -627,7 +612,6 @@ async fn execute_cmd<S: Store>(
             if !trimmed.is_empty() {
                 if let Some(react_arg) = trimmed.strip_prefix("/react").map(str::trim) {
                     if react_arg.is_empty() {
-                        // /react with no arg: show current reactions on status bar.
                         if let Some((target_ts, _, _)) = quote_info {
                             if let Some(chat) = &mut app.chat {
                                 let hint = reaction_hint(&chat.reactions, target_ts);
@@ -636,14 +620,12 @@ async fn execute_cmd<S: Store>(
                         }
                     } else if let Some((target_ts, target_author, _)) = quote_info {
                         if let Some(emoji) = resolve_emoji(react_arg) {
-                            let remove = {
-                                let own_bytes = app.own_aci.map(|u| *u.as_bytes());
-                                app.chat.as_ref()
-                                    .and_then(|c| c.reactions.get(&target_ts))
-                                    .and_then(|m| m.get(&emoji))
-                                    .and_then(|s| own_bytes.map(|b| s.contains(&b)))
-                                    .unwrap_or(false)
-                            };
+                            let remove = app.own_aci
+                                .and_then(|u| {
+                                    app.chat.as_ref()?.reactions.get(&target_ts)?.get(&emoji)
+                                        .map(|s| s.contains(u.as_bytes()))
+                                })
+                                .unwrap_or(false);
                             signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
                             if let Ok(rxns) = signal::load_reactions(manager, &thread).await {
                                 if let Some(chat) = &mut app.chat {
@@ -723,7 +705,7 @@ pub async fn run<S: Store>(
                                     .map(|c| c.messages.iter().map(|m| m.timestamp()).collect())
                                     .unwrap_or_default();
 
-                                if let Ok(msgs) = signal::load_messages(&manager, &thread).await {
+                                if let Ok((msgs, reactions)) = signal::load_messages_and_reactions(&manager, &thread).await {
                                     let receipt_state = signal::load_receipt_state(&manager, &thread).await.ok();
 
                                     let own_aci = app.own_aci;
@@ -734,16 +716,13 @@ pub async fn run<S: Store>(
                                         .map(|m| m.timestamp())
                                         .collect();
 
-                                    let reactions = signal::load_reactions(&manager, &thread).await.ok();
                                     if let Some(chat) = &mut app.chat {
                                         chat.messages = msgs;
                                         if let Some((del, rd)) = receipt_state {
                                             chat.delivered = del;
                                             chat.read = rd;
                                         }
-                                        if let Some(rxns) = reactions {
-                                            chat.reactions = rxns;
-                                        }
+                                        chat.reactions = reactions;
                                     }
 
                                     if !to_ack.is_empty() {
