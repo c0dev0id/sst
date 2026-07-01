@@ -107,7 +107,7 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
 
     if list {
         signal::sync(&mut manager, &mut state).await?;
-        let threads = signal::list_threads(&manager, &state).await?;
+        let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
         println!("--- {} chat(s) ---", threads.len());
         for entry in &threads {
             let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
@@ -117,7 +117,7 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
     }
 
     let stream = signal::connect(&mut manager, &mut state).await?;
-    let threads = signal::list_threads(&manager, &state).await?;
+    let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     tokio::task::spawn_local(async move {
@@ -129,7 +129,7 @@ async fn run<S: Store>(relink: bool, list: bool, store: S, data_dir: std::path::
         }
     });
 
-    app::run(threads, state.own_aci, manager, rx).await
+    app::run(threads, state.own_aci, state.data_dir, manager, rx).await
 }
 
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {

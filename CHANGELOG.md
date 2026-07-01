@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Contact browser (`n` from chat list): shows all synced contacts and known groups regardless of message history; contacts first (alphabetical) then groups separated by a `── groups ──` divider. Allows opening any thread, including ones with no prior messages.
 
 ### Fixed
+- Chat list is now refreshed from the store whenever you return to it (Esc from chat window, Esc/q from contact browser), so newly started threads appear immediately
 - Read receipts now sent for messages that arrive while the chat is already open, not only on initial open
 - Chat window: long message lines now word-wrap to the window width instead of being clipped
 - Chat list: preview lines now truncate to terminal width with `…` instead of hard-clipping

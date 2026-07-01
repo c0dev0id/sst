@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
@@ -39,6 +40,7 @@ pub struct ChatState {
 pub enum AppCmd {
     OpenChat { thread: Thread, name: String },
     OpenContactBrowser,
+    RefreshThreadList,
     SendMessage,
 }
 
@@ -49,13 +51,14 @@ pub struct App {
     pub view: View,
     pub chat: Option<ChatState>,
     pub own_aci: Option<Uuid>,
+    pub data_dir: PathBuf,
     pub contacts: Vec<ThreadEntry>,
     pub contacts_split: usize,           // how many entries in `contacts` are Contact threads
     pub contact_list_state: ListState,
 }
 
 impl App {
-    pub fn new(threads: Vec<ThreadEntry>, own_aci: Option<Uuid>) -> Self {
+    pub fn new(threads: Vec<ThreadEntry>, own_aci: Option<Uuid>, data_dir: PathBuf) -> Self {
         let mut list_state = ListState::default();
         if !threads.is_empty() {
             list_state.select(Some(0));
@@ -67,6 +70,7 @@ impl App {
             view: View::ChatList,
             chat: None,
             own_aci,
+            data_dir,
             contacts: Vec::new(),
             contacts_split: 0,
             contact_list_state: ListState::default(),
@@ -171,11 +175,11 @@ impl App {
                     chat.tab_pressed = false;
                     chat.autocomplete_hint = None;
                 }
+                return None;
             } else {
-                self.view = View::ChatList;
                 self.chat = None;
+                return Some(AppCmd::RefreshThreadList);
             }
-            return None;
         }
 
         let chat = self.chat.as_mut()?;
@@ -293,8 +297,7 @@ impl App {
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
-                self.view = View::ChatList;
-                None
+                Some(AppCmd::RefreshThreadList)
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
@@ -530,6 +533,18 @@ async fn execute_cmd<S: Store>(
             app.contact_list_state = state;
             app.view = View::ContactBrowser;
         }
+        AppCmd::RefreshThreadList => {
+            let threads = signal::list_threads(manager, &app.data_dir, app.own_aci).await?;
+            app.threads = threads;
+            // Clamp selection so it stays valid after the list changes.
+            let new_len = app.threads.len();
+            match app.list_state.selected() {
+                Some(sel) if new_len > 0 => app.list_state.select(Some(sel.min(new_len - 1))),
+                None if new_len > 0 => app.list_state.select(Some(0)),
+                _ => {}
+            }
+            app.view = View::ChatList;
+        }
         AppCmd::SendMessage => {
             // Capture everything we need before mutably borrowing the manager.
             let (text, thread, quote_info) = {
@@ -578,6 +593,7 @@ async fn execute_cmd<S: Store>(
 pub async fn run<S: Store>(
     threads: Vec<ThreadEntry>,
     own_aci: Option<Uuid>,
+    data_dir: PathBuf,
     mut manager: Manager<S, Registered>,
     rx: mpsc::Receiver<Received>,
 ) -> anyhow::Result<()> {
@@ -588,7 +604,7 @@ pub async fn run<S: Store>(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(threads, own_aci);
+    let mut app = App::new(threads, own_aci, data_dir);
     let mut events = EventStream::new();
     let mut rx = Some(rx);
 

@@ -156,7 +156,8 @@ pub fn extract_update(content: &Content) -> Option<MessageUpdate> {
 /// Sorted most-recent-first; threads with no messages are omitted.
 pub async fn list_threads<S: Store>(
     manager: &Manager<S, Registered>,
-    state: &SyncState,
+    data_dir: &Path,
+    own_aci: Option<Uuid>,
 ) -> anyhow::Result<Vec<ThreadEntry>> {
     let mut entries: Vec<ThreadEntry> = Vec::new();
     let mut seen: HashSet<Uuid> = HashSet::new();
@@ -166,7 +167,7 @@ pub async fn list_threads<S: Store>(
         seen.insert(contact.uuid);
         let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
-        let name = if state.own_aci == Some(contact.uuid) {
+        let name = if own_aci == Some(contact.uuid) {
             "Note to Self".to_string()
         } else {
             contact_display_name(&contact)
@@ -177,7 +178,7 @@ pub async fn list_threads<S: Store>(
         }
     }
 
-    for uuid_bytes in load_contact_uuids(&state.contacts_path()) {
+    for uuid_bytes in load_contact_uuids(&data_dir.join("known_contacts")) {
         let uuid = Uuid::from_bytes(uuid_bytes);
         if seen.contains(&uuid) {
             continue;
