@@ -29,5 +29,15 @@ Stream reconnect, CLI flags (--send, --read, --read-stream, --contact-list), and
   - On success, show the saved local path on the status bar
   - presage API to check: `Manager::get_attachment()` or similar CDN fetch
 
+### Message editing
+- [ ] `/edit` slash command: requires a selected own message; pulls its body into the input bar; sending replaces the message on Signal
+  - Only works on own messages — show error on status bar if the selected message is from someone else
+  - Wire up via `ContentBody::EditMessage { target_sent_timestamp: Some(original_ts), data_message: Some(DataMessage { body: Some(new_text), .. }) }`
+  - Send path mirrors `send_to_thread`/`send_message_to_group` — same 1:1 vs group branch
+  - After send, call `reload_chat()` so the updated body appears immediately
+  - The store may or may not update the original message in-place (presage handles incoming edits via `save_message`); test whether the local store reflects the edit or stores a second entry
+  - Register in `SLASH_COMMANDS` with `needs_selection: true, has_arg: false` (arg comes from pre-filled input bar, not the command line)
+  - UX: when `/edit` is executed, clear the input bar and populate it with the selected message body; cursor goes to end
+
 ### Infrastructure
 - [ ] `d` key on chat list to delete thread (with confirmation), per spec
