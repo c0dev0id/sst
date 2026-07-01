@@ -3095,26 +3095,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sst"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "directories",
- "futures",
- "presage",
- "presage-store-sqlite",
- "qr2term",
- "ratatui",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3370,6 +3350,26 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "sst"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "directories",
+ "futures",
+ "presage",
+ "presage-store-sqlite",
+ "qr2term",
+ "ratatui",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
