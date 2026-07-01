@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `--contact-list` now fetches Signal profiles for UUID-only contacts (group members not in the phone's address book) using the profile key cached in the local store; resolved names are shown immediately and cached for future lookups
+
 ### Changed
 - Slash command dispatch refactored into a single registry (`SLASH_COMMANDS` const + `SlashCmd` enum + `parse_slash_cmd()`); each entry declares `needs_selection` and `has_arg` metadata; commands that require a selection now show an error on the status bar instead of silently doing nothing
 
