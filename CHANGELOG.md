@@ -23,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Tab completion for `@mentions`: `@<partial>Tab` completes on a unique match from known 1:1 contacts; double Tab shows all candidates on the status bar. Excludes "Note to Self".
 
 ### Fixed
+- Read receipts now sent for messages that arrive while the chat is already open, not only on initial open
+- Chat window: long message lines now word-wrap to the window width instead of being clipped
+- Chat list: preview lines now truncate to terminal width with `…` instead of hard-clipping
 - WebSocket close error no longer corrupts the TUI: tracing output is redirected to `sst.log` in the data directory when running in TUI mode; `--list` mode continues writing to stderr
 - Separate chunk sizes for contact UUID blobs (16 bytes) vs group master key blobs (32 bytes) — previously a single loader used 32-byte chunks, silently merging two contacts into one unusable entry
 - "Note to Self" thread now shows by name instead of phone number

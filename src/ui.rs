@@ -28,6 +28,7 @@ fn draw_chat_list_screen(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let max_width = area.width as usize;
     let items: Vec<ListItem> = app
         .threads
         .iter()
@@ -39,6 +40,12 @@ fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
                     format!("{}{}: {}", prefix, t.name, collapsed)
                 }
                 _ => format!("{}{}", prefix, t.name),
+            };
+            let text = if text.chars().count() > max_width {
+                let truncated: String = text.chars().take(max_width.saturating_sub(1)).collect();
+                format!("{}…", truncated)
+            } else {
+                text
             };
             ListItem::new(text)
         })
@@ -197,17 +204,21 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             lines.push(if is_selected { q_line.style(highlight) } else { q_line });
         }
 
-        // Message body — indent each line, highlight if selected.
-        // Append ✓/✓✓ receipt indicator on the last line of own messages.
+        // Message body — word-wrapped; indent each wrapped line.
+        // Append ✓/✓✓ receipt indicator on the very last wrapped line of own messages.
         let body = signal::message_body(content);
-        let body_lines: Vec<&str> = body.lines().collect();
         let receipt = if is_own {
             receipt_indicator(&chat.read, &chat.delivered, ts)
         } else {
             ""
         };
-        for (i, text_line) in body_lines.iter().enumerate() {
-            let is_last = i + 1 == body_lines.len();
+        let wrap_width = (area.width as usize).saturating_sub(2);
+        let wrapped: Vec<String> = body.split('\n')
+            .flat_map(|l| word_wrap(l, wrap_width))
+            .collect();
+        let total_wrapped = wrapped.len();
+        for (i, text_line) in wrapped.iter().enumerate() {
+            let is_last = i + 1 == total_wrapped;
             let text = if is_last && !receipt.is_empty() {
                 format!("  {}{}", text_line, receipt)
             } else {
@@ -347,6 +358,44 @@ fn receipt_indicator(read: &std::collections::HashSet<u64>, delivered: &std::col
     if read.contains(&ts) { "  ✓✓" }
     else if delivered.contains(&ts) { "  ✓" }
     else { "" }
+}
+
+/// Word-wrap `text` to at most `max_width` chars per line.
+/// Splits on existing `\n` first, then breaks long paragraphs at word boundaries.
+/// Words longer than `max_width` are placed on their own line and left to overflow.
+fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.chars().count() <= max_width {
+            lines.push(paragraph.to_string());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_len = 0usize;
+        for word in paragraph.split_whitespace() {
+            let wlen = word.chars().count();
+            if current.is_empty() {
+                current.push_str(word);
+                current_len = wlen;
+            } else if current_len + 1 + wlen <= max_width {
+                current.push(' ');
+                current.push_str(word);
+                current_len += 1 + wlen;
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+                current_len = wlen;
+            }
+        }
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn fmt_ts_short(ts_ms: u64) -> String {
