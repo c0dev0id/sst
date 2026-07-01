@@ -397,6 +397,9 @@ fn chat_status_bar(app: &App) -> String {
         Some(c) => c,
         None => return String::new(),
     };
+    if let Some(hint) = &chat.autocomplete_hint {
+        return format!("  Tab:  {}", hint);
+    }
     if let Some(sel_idx) = chat.selected_message {
         if let Some(content) = chat.messages.get(sel_idx) {
             let sender_uuid = content.metadata.sender.raw_uuid();
@@ -406,9 +409,6 @@ fn chat_status_bar(app: &App) -> String {
             let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
             return format!("  [{}]  {}  ·  {}  |  /reply <text>↵   /react <emoji>   Shift+↑↓   Esc deselect", pos, sender, ts);
         }
-    }
-    if let Some(hint) = &chat.autocomplete_hint {
-        return format!("  Tab:  {}", hint);
     }
     "  ←→↑↓ cursor   PgUp/PgDn scroll   Shift+↑ select   Esc back   Enter send   Shift+Enter newline".to_string()
 }
