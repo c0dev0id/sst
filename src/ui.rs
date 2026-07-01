@@ -13,6 +13,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.view {
         View::ChatList => draw_chat_list_screen(f, app),
         View::ChatWindow => draw_chat_window_screen(f, app),
+        View::ContactBrowser => draw_contact_browser_screen(f, app),
     }
 }
 
@@ -24,7 +25,7 @@ fn draw_chat_list_screen(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
     draw_thread_list(f, app, chunks[0]);
-    draw_status_bar(f, chunks[1], "  ↑↓ navigate   PgUp/PgDn scroll   Enter open   Q quit");
+    draw_status_bar(f, chunks[1], "  ↑↓ navigate   PgUp/PgDn scroll   Enter open   n new chat   Q quit");
 }
 
 fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -66,6 +67,59 @@ fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     f.render_stateful_widget(list.block(Block::default()), area, &mut app.list_state);
+}
+
+// ── Contact browser ───────────────────────────────────────────────────────────
+
+fn draw_contact_browser_screen(f: &mut Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+        .split(f.area());
+
+    let header = Paragraph::new(" New Chat")
+        .style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD));
+    f.render_widget(header, chunks[0]);
+
+    draw_contact_list(f, app, chunks[1]);
+    draw_status_bar(f, chunks[2], "  ↑↓ navigate   PgUp/PgDn scroll   Enter open   Esc back");
+}
+
+fn draw_contact_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let has_sep = app.contacts_split > 0 && app.contacts_split < app.contacts.len();
+    let max_width = area.width as usize;
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (i, entry) in app.contacts.iter().enumerate() {
+        if has_sep && i == app.contacts_split {
+            let sep_text = format!("{:─^width$}", " groups ", width = max_width);
+            items.push(ListItem::new(Line::from(Span::styled(
+                sep_text,
+                Style::default().fg(Color::DarkGray),
+            ))));
+        }
+        let name = if entry.name.chars().count() > max_width {
+            let t: String = entry.name.chars().take(max_width.saturating_sub(1)).collect();
+            format!("{}…", t)
+        } else {
+            entry.name.clone()
+        };
+        items.push(ListItem::new(name));
+    }
+
+    if items.is_empty() {
+        f.render_widget(
+            Paragraph::new("(no contacts synced yet)")
+                .style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .scroll_padding(1);
+    f.render_stateful_widget(list.block(Block::default()), area, &mut app.contact_list_state);
 }
 
 // ── Chat window ───────────────────────────────────────────────────────────────

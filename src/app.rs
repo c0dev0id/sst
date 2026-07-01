@@ -18,6 +18,7 @@ use crate::signal::{self, ThreadEntry};
 pub enum View {
     ChatList,
     ChatWindow,
+    ContactBrowser,
 }
 
 pub struct ChatState {
@@ -36,7 +37,8 @@ pub struct ChatState {
 }
 
 pub enum AppCmd {
-    OpenChat(usize),
+    OpenChat { thread: Thread, name: String },
+    OpenContactBrowser,
     SendMessage,
 }
 
@@ -47,6 +49,9 @@ pub struct App {
     pub view: View,
     pub chat: Option<ChatState>,
     pub own_aci: Option<Uuid>,
+    pub contacts: Vec<ThreadEntry>,
+    pub contacts_split: usize,           // how many entries in `contacts` are Contact threads
+    pub contact_list_state: ListState,
 }
 
 impl App {
@@ -55,7 +60,17 @@ impl App {
         if !threads.is_empty() {
             list_state.select(Some(0));
         }
-        Self { threads, list_state, quit: false, view: View::ChatList, chat: None, own_aci }
+        Self {
+            threads,
+            list_state,
+            quit: false,
+            view: View::ChatList,
+            chat: None,
+            own_aci,
+            contacts: Vec::new(),
+            contacts_split: 0,
+            contact_list_state: ListState::default(),
+        }
     }
 
     pub fn open_chat(
@@ -101,6 +116,7 @@ impl App {
         match self.view {
             View::ChatList => self.on_key_list(key),
             View::ChatWindow => self.on_key_chat(key),
+            View::ContactBrowser => self.on_key_contacts(key),
         }
     }
 
@@ -131,7 +147,13 @@ impl App {
                 self.select(prev);
                 None
             }
-            KeyCode::Enter => self.selected().map(AppCmd::OpenChat),
+            KeyCode::Char('n') => Some(AppCmd::OpenContactBrowser),
+            KeyCode::Enter => {
+                self.selected().and_then(|idx| {
+                    let t = self.threads.get(idx)?;
+                    Some(AppCmd::OpenChat { thread: t.thread.clone(), name: t.name.clone() })
+                })
+            }
             _ => None,
         }
     }
@@ -258,6 +280,67 @@ impl App {
                     }
                 }
                 None
+            }
+            _ => None,
+        }
+    }
+
+    fn on_key_contacts(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
+        // Whether a separator row exists between contacts and groups.
+        let has_sep = self.contacts_split > 0 && self.contacts_split < self.contacts.len();
+        let total = self.contacts.len() + if has_sep { 1 } else { 0 };
+        let sep = self.contacts_split; // display index of the separator row
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                self.view = View::ChatList;
+                None
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
+                None
+            }
+            KeyCode::Down => {
+                let cur = self.contact_list_state.selected().unwrap_or(0);
+                let mut next = (cur + 1).min(total.saturating_sub(1));
+                if has_sep && next == sep { next = (next + 1).min(total - 1); }
+                self.contact_list_state.select(Some(next));
+                None
+            }
+            KeyCode::Up => {
+                let cur = self.contact_list_state.selected().unwrap_or(0);
+                if cur == 0 { return None; }
+                let mut prev = cur - 1;
+                if has_sep && prev == sep { prev = prev.saturating_sub(1); }
+                self.contact_list_state.select(Some(prev));
+                None
+            }
+            KeyCode::PageDown => {
+                let cur = self.contact_list_state.selected().unwrap_or(0);
+                let mut next = (cur + 10).min(total.saturating_sub(1));
+                if has_sep && next == sep { next = (next + 1).min(total - 1); }
+                self.contact_list_state.select(Some(next));
+                None
+            }
+            KeyCode::PageUp => {
+                let cur = self.contact_list_state.selected().unwrap_or(0);
+                let mut prev = cur.saturating_sub(10);
+                if has_sep && prev == sep { prev = prev.saturating_sub(1); }
+                self.contact_list_state.select(Some(prev));
+                None
+            }
+            KeyCode::Enter => {
+                let display_idx = self.contact_list_state.selected()?;
+                // Map display index to data index (skip separator row).
+                let data_idx = if has_sep {
+                    if display_idx < sep { display_idx }
+                    else if display_idx == sep { return None; }
+                    else { display_idx - 1 }
+                } else {
+                    display_idx
+                };
+                let entry = self.contacts.get(data_idx)?;
+                Some(AppCmd::OpenChat { thread: entry.thread.clone(), name: entry.name.clone() })
             }
             _ => None,
         }
@@ -417,15 +500,12 @@ async fn execute_cmd<S: Store>(
     cmd: AppCmd,
 ) -> anyhow::Result<()> {
     match cmd {
-        AppCmd::OpenChat(idx) => {
-            let thread = app.threads[idx].thread.clone();
-            let name = app.threads[idx].name.clone();
+        AppCmd::OpenChat { thread, name } => {
             let messages = signal::load_messages(manager, &thread).await?;
             let (delivered, read) = signal::load_receipt_state(manager, &thread)
                 .await
                 .unwrap_or_default();
 
-            // Collect timestamps of incoming messages to acknowledge as read.
             let own_aci = app.own_aci;
             let to_ack: Vec<u64> = messages
                 .iter()
@@ -438,6 +518,17 @@ async fn execute_cmd<S: Store>(
             if let Err(e) = signal::send_read_receipt(manager, &thread, to_ack).await {
                 tracing::warn!("send_read_receipt: {e}");
             }
+        }
+        AppCmd::OpenContactBrowser => {
+            let (contacts, split) = signal::list_all_contacts(manager, app.own_aci).await?;
+            app.contacts = contacts;
+            app.contacts_split = split;
+            let mut state = ListState::default();
+            if !app.contacts.is_empty() {
+                state.select(Some(0));
+            }
+            app.contact_list_state = state;
+            app.view = View::ContactBrowser;
         }
         AppCmd::SendMessage => {
             // Capture everything we need before mutably borrowing the manager.

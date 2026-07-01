@@ -208,6 +208,40 @@ pub async fn list_threads<S: Store>(
     Ok(entries)
 }
 
+/// Load every contact and group regardless of message history.
+/// Returns `(entries, contacts_len)` where contacts come first (case-insensitive alpha)
+/// followed by groups (case-insensitive alpha). Excludes the account owner.
+pub async fn list_all_contacts<S: Store>(
+    manager: &Manager<S, Registered>,
+    own_aci: Option<Uuid>,
+) -> anyhow::Result<(Vec<ThreadEntry>, usize)> {
+    let mut contact_entries: Vec<ThreadEntry> = Vec::new();
+
+    for result in manager.store().contacts().await? {
+        let contact = result?;
+        if own_aci == Some(contact.uuid) {
+            continue;
+        }
+        let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
+        let thread = Thread::Contact(service_id);
+        let name = contact_display_name(&contact);
+        contact_entries.push(ThreadEntry { thread, name, last_preview: None, last_ts: 0, unread: false });
+    }
+    contact_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let contacts_len = contact_entries.len();
+
+    let mut group_entries: Vec<ThreadEntry> = Vec::new();
+    for result in manager.store().groups().await? {
+        let (master_key, group) = result?;
+        let thread = Thread::Group(master_key);
+        group_entries.push(ThreadEntry { thread, name: group.title, last_preview: None, last_ts: 0, unread: false });
+    }
+    group_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    contact_entries.extend(group_entries);
+    Ok((contact_entries, contacts_len))
+}
+
 fn contact_display_name(contact: &presage::model::contacts::Contact) -> String {
     if !contact.name.is_empty() {
         return contact.name.clone();
