@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Starting a second sst instance while one is already running would silently corrupt the Signal session, causing messages to appear sent locally but never arrive on other devices. sst now acquires an exclusive `flock`-based lock on startup and exits immediately with a clear error if another instance holds it.
+
 ### Added
 - `--contact-list` now fetches Signal profiles for UUID-only contacts (group members not in the phone's address book) using the profile key cached in the local store; resolved names are shown immediately and cached for future lookups
 
