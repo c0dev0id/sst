@@ -74,6 +74,23 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let data_dir = db_path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
 
+    // Prevent concurrent instances from corrupting the Signal session state.
+    // Two Manager instances on the same SQLite store will diverge their in-memory
+    // ratchet/sender-key state, causing messages to appear sent locally but fail
+    // to decrypt on all recipients.
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(data_dir.join("sst.lock"))
+        .context("failed to open lock file")?;
+    let mut lock_holder = fd_lock::RwLock::new(lock_file);
+    let _lock_guard = lock_holder.try_write().map_err(|_| {
+        anyhow::anyhow!(
+            "another sst instance is already running\n\
+             (only one instance may use the Signal session at a time)"
+        )
+    })?;
+
     if args.relink {
         if db_path.exists() {
             eprintln!("Warning: this will wipe the local database at {}", db_path.display());
