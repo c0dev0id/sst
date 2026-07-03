@@ -10,7 +10,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
-use presage::libsignal_service::proto::{DataMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
+use presage::libsignal_service::proto::{DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
 
 /// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
 /// Apply in chronological order to handle add/remove toggles correctly.
@@ -563,11 +563,20 @@ pub async fn send_reaction<S: Store>(
 pub async fn send_edit<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
-    _target_ts: u64,
+    target_ts: u64,
     body: String,
 ) -> anyhow::Result<()> {
-    // TODO: send as Signal EditMessage once presage exposes the API
-    send_to_thread(manager, thread, body).await
+    let ts = now_millis()?;
+    let data_message = DataMessage {
+        body: Some(body),
+        timestamp: Some(ts),
+        ..Default::default()
+    };
+    let edit = ContentBody::EditMessage(EditMessage {
+        target_sent_timestamp: Some(target_ts),
+        data_message: Some(data_message),
+    });
+    dispatch_send_body(manager, thread, edit, ts).await
 }
 
 pub async fn send_to_thread<S: Store>(
@@ -700,16 +709,25 @@ async fn dispatch_send<S: Store>(
     data_message: DataMessage,
     ts: u64,
 ) -> anyhow::Result<()> {
+    dispatch_send_body(manager, thread, ContentBody::DataMessage(data_message), ts).await
+}
+
+async fn dispatch_send_body<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    body: ContentBody,
+    ts: u64,
+) -> anyhow::Result<()> {
     match thread {
         Thread::Contact(service_id) => {
             manager
-                .send_message(service_id.clone(), data_message, ts)
+                .send_message(service_id.clone(), body, ts)
                 .await
                 .context("failed to send message")?;
         }
         Thread::Group(master_key) => {
             manager
-                .send_message_to_group(master_key, data_message, ts)
+                .send_message_to_group(master_key, body, ts)
                 .await
                 .context("failed to send message to group")?;
         }
