@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- In Insert mode, Enter now inserts a newline and Shift+Enter sends the message (swapped from previous behavior)
+
 ### Added
 - Vim-style modal navigation in the chat window: Normal mode (default on open), Insert mode (`i`), Command mode (`:`). Normal mode uses `j`/`k` to select messages, `r` to reply, `e` to edit own messages, `d` to delete, `:` for colon commands, `q`/`←` to return to chat list.
 - Delete for everyone: `d` in Normal mode on a selected own message sends a `DataMessage.delete` to the thread (Signal propagates it to all recipients/group members), then removes it from the local store. Non-own messages are rejected with a status bar error.

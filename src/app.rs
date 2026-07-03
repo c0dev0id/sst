@@ -313,13 +313,13 @@ impl App {
                         chat.scroll = chat.scroll.saturating_sub(h);
                     }
                     KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        chat.input.insert(chat.cursor, '\n');
-                        chat.cursor += 1;
-                    }
-                    KeyCode::Enter => {
                         if !chat.input.trim().is_empty() {
                             return Some(AppCmd::SendMessage);
                         }
+                    }
+                    KeyCode::Enter => {
+                        chat.input.insert(chat.cursor, '\n');
+                        chat.cursor += 1;
                     }
                     KeyCode::Backspace => {
                         if chat.cursor > 0 {
