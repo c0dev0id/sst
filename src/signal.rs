@@ -560,6 +560,16 @@ pub async fn send_reaction<S: Store>(
     dispatch_send(manager, thread, data_message, ts).await
 }
 
+pub async fn send_edit<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    _target_ts: u64,
+    body: String,
+) -> anyhow::Result<()> {
+    // TODO: send as Signal EditMessage once presage exposes the API
+    send_to_thread(manager, thread, body).await
+}
+
 pub async fn send_to_thread<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,

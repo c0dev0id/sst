@@ -22,6 +22,12 @@ pub enum View {
     ContactBrowser,
 }
 
+pub enum Mode {
+    Normal,
+    Insert,
+    Command(String),
+}
+
 pub struct ChatState {
     pub thread: Thread,
     pub thread_name: String,
@@ -29,12 +35,15 @@ pub struct ChatState {
     pub scroll: usize,
     pub viewport_height: u16,
     pub input: String,
-    pub cursor: usize,                       // byte offset into `input`
-    pub selected_message: Option<usize>,     // index into `messages`
-    pub delivered: HashSet<u64>,             // timestamps of our messages confirmed delivered
-    pub read: HashSet<u64>,                  // timestamps of our messages confirmed read
-    pub autocomplete_hint: Option<String>,   // shown on status bar after double-Tab
+    pub cursor: usize,                     // byte offset into `input`
+    pub selected_message: Option<usize>,   // index into `messages`
+    pub delivered: HashSet<u64>,           // timestamps of our messages confirmed delivered
+    pub read: HashSet<u64>,                // timestamps of our messages confirmed read
+    pub autocomplete_hint: Option<String>, // shown on status bar after Tab
     pub reactions: ReactionMap,
+    pub mode: Mode,
+    pub reply_to: Option<usize>,           // message index set by 'r' in Normal mode
+    pub editing: Option<(usize, u64)>,     // (message index, timestamp) set by 'e' in Normal mode
 }
 
 pub enum AppCmd {
@@ -42,6 +51,7 @@ pub enum AppCmd {
     OpenContactBrowser,
     RefreshThreadList,
     SendMessage,
+    ExecCmd(String), // colon command text (without leading ':')
 }
 
 pub struct App {
@@ -53,7 +63,7 @@ pub struct App {
     pub own_aci: Option<Uuid>,
     pub data_dir: PathBuf,
     pub contacts: Vec<ThreadEntry>,
-    pub contacts_split: usize,           // how many entries in `contacts` are Contact threads
+    pub contacts_split: usize,
     pub contact_list_state: ListState,
 }
 
@@ -99,6 +109,9 @@ impl App {
             read,
             autocomplete_hint: None,
             reactions,
+            mode: Mode::Normal,
+            reply_to: None,
+            editing: None,
         });
         self.view = View::ChatWindow;
     }
@@ -153,7 +166,7 @@ impl App {
                 None
             }
             KeyCode::Char('n') => Some(AppCmd::OpenContactBrowser),
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Right => {
                 self.selected().and_then(|idx| {
                     let t = self.threads.get(idx)?;
                     Some(AppCmd::OpenChat { thread: t.thread.clone(), name: t.name.clone() })
@@ -164,132 +177,213 @@ impl App {
     }
 
     fn on_key_chat(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
-        // Esc is handled before borrowing `chat` because its two branches
-        // either mutate chat.selected_message OR set self.chat = None — the
-        // borrow checker can't elide a `chat` borrow that's used in one branch
-        // while `self.chat = None` fires in the other.
-        if key.code == KeyCode::Esc {
-            let has_selection = self.chat.as_ref().map(|c| c.selected_message.is_some()).unwrap_or(false);
-            if has_selection {
-                if let Some(chat) = &mut self.chat {
-                    chat.selected_message = None;
-                    chat.autocomplete_hint = None;
+        // Keys that need to set self.chat = None must fire before any borrow of self.chat.
+        if matches!(self.chat.as_ref()?.mode, Mode::Normal) {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Left => {
+                    self.chat = None;
+                    return Some(AppCmd::RefreshThreadList);
                 }
-                return None;
-            } else {
-                self.chat = None;
-                return Some(AppCmd::RefreshThreadList);
+                _ => {}
             }
         }
 
+        // Snapshot own_aci (Copy) before borrowing chat so Normal 'e' can check message ownership.
+        let own_aci = self.own_aci;
         let chat = self.chat.as_mut()?;
 
         if key.code != KeyCode::Tab {
             chat.autocomplete_hint = None;
         }
 
-        match key.code {
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                if !chat.messages.is_empty() {
-                    chat.selected_message = Some(
-                        chat.selected_message
-                            .map(|s| s.saturating_sub(1))
-                            .unwrap_or(chat.messages.len() - 1),
-                    );
-                }
-                None
-            }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                if let Some(sel) = chat.selected_message {
-                    let max = chat.messages.len().saturating_sub(1);
-                    if sel < max {
-                        chat.selected_message = Some(sel + 1);
+        // Snapshot mode discriminant to avoid holding a borrow into chat.mode across mutations.
+        let mode_disc = match &chat.mode {
+            Mode::Normal => 0u8,
+            Mode::Insert => 1,
+            Mode::Command(_) => 2,
+        };
+
+        match mode_disc {
+            0 => { // Normal mode
+                match key.code {
+                    KeyCode::Esc => {
+                        if chat.selected_message.is_some() {
+                            chat.selected_message = None;
+                            chat.reply_to = None;
+                            chat.editing = None;
+                        }
                     }
+                    KeyCode::Char('i') => {
+                        chat.mode = Mode::Insert;
+                    }
+                    KeyCode::Char(':') => {
+                        chat.mode = Mode::Command(String::new());
+                    }
+                    KeyCode::Char('r') => {
+                        if chat.selected_message.is_some() {
+                            chat.reply_to = chat.selected_message;
+                            chat.cursor = chat.input.len();
+                            chat.mode = Mode::Insert;
+                        } else {
+                            chat.autocomplete_hint = Some("select a message first (j/k)".to_string());
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(sel_idx) = chat.selected_message {
+                            if let Some(content) = chat.messages.get(sel_idx) {
+                                let is_own = own_aci
+                                    .map(|a| a == content.metadata.sender.raw_uuid())
+                                    .unwrap_or(false);
+                                if is_own {
+                                    let body = signal::message_body(content).to_string();
+                                    let ts = content.timestamp();
+                                    chat.input = body;
+                                    chat.cursor = chat.input.len();
+                                    chat.editing = Some((sel_idx, ts));
+                                    chat.mode = Mode::Insert;
+                                } else {
+                                    chat.autocomplete_hint =
+                                        Some("can only edit own messages".to_string());
+                                }
+                            }
+                        } else {
+                            chat.autocomplete_hint =
+                                Some("select a message first (j/k)".to_string());
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if !chat.messages.is_empty() {
+                            chat.selected_message = Some(
+                                chat.selected_message
+                                    .map(|s| s.saturating_sub(1))
+                                    .unwrap_or(chat.messages.len() - 1),
+                            );
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(sel) = chat.selected_message {
+                            if sel + 1 < chat.messages.len() {
+                                chat.selected_message = Some(sel + 1);
+                            }
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        let h = chat.viewport_height as usize;
+                        chat.scroll = chat.scroll.saturating_add(h);
+                    }
+                    KeyCode::PageDown => {
+                        let h = chat.viewport_height as usize;
+                        chat.scroll = chat.scroll.saturating_sub(h);
+                    }
+                    _ => {}
                 }
-                None
             }
-            KeyCode::Left => {
-                chat.cursor = cursor_left(&chat.input, chat.cursor);
-                None
+            1 => { // Insert mode
+                match key.code {
+                    KeyCode::Esc => {
+                        chat.mode = Mode::Normal;
+                    }
+                    KeyCode::Left => {
+                        chat.cursor = cursor_left(&chat.input, chat.cursor);
+                    }
+                    KeyCode::Right => {
+                        chat.cursor = cursor_right(&chat.input, chat.cursor);
+                    }
+                    KeyCode::Up => {
+                        chat.cursor = cursor_up(&chat.input, chat.cursor);
+                    }
+                    KeyCode::Down => {
+                        chat.cursor = cursor_down(&chat.input, chat.cursor);
+                    }
+                    KeyCode::PageUp => {
+                        let h = chat.viewport_height as usize;
+                        chat.scroll = chat.scroll.saturating_add(h);
+                    }
+                    KeyCode::PageDown => {
+                        let h = chat.viewport_height as usize;
+                        chat.scroll = chat.scroll.saturating_sub(h);
+                    }
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        chat.input.insert(chat.cursor, '\n');
+                        chat.cursor += 1;
+                    }
+                    KeyCode::Enter => {
+                        if !chat.input.trim().is_empty() {
+                            return Some(AppCmd::SendMessage);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if chat.cursor > 0 {
+                            let new_cursor = cursor_left(&chat.input, chat.cursor);
+                            chat.input.remove(new_cursor);
+                            chat.cursor = new_cursor;
+                        }
+                    }
+                    // Ctrl+H is the terminal-conventional backspace (0x08). Some
+                    // terminal emulators (including OpenBSD's) send it for Shift+Backspace.
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if chat.cursor > 0 {
+                            let new_cursor = cursor_left(&chat.input, chat.cursor);
+                            chat.input.remove(new_cursor);
+                            chat.cursor = new_cursor;
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        chat.input.insert(chat.cursor, c);
+                        chat.cursor += c.len_utf8();
+                    }
+                    KeyCode::Tab => {
+                        // Field borrow splitting: self.threads is separate from self.chat.
+                        let threads = &self.threads;
+                        if let Some((start, end, candidates, display)) =
+                            completion_candidates(&chat.input, chat.cursor, threads)
+                        {
+                            if candidates.len() == 1 {
+                                let rep = candidates[0].clone();
+                                chat.input.replace_range(start..end, &rep);
+                                chat.cursor = start + rep.len();
+                                chat.autocomplete_hint = None;
+                            } else {
+                                let labels = display.as_deref().unwrap_or(&candidates);
+                                chat.autocomplete_hint = Some(labels.join("  "));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
-            KeyCode::Right => {
-                chat.cursor = cursor_right(&chat.input, chat.cursor);
-                None
-            }
-            KeyCode::Up => {
-                chat.cursor = cursor_up(&chat.input, chat.cursor);
-                None
-            }
-            KeyCode::Down => {
-                chat.cursor = cursor_down(&chat.input, chat.cursor);
-                None
-            }
-            KeyCode::PageUp => {
-                let h = chat.viewport_height as usize;
-                chat.scroll = chat.scroll.saturating_add(h);
-                None
-            }
-            KeyCode::PageDown => {
-                let h = chat.viewport_height as usize;
-                chat.scroll = chat.scroll.saturating_sub(h);
-                None
-            }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                chat.input.insert(chat.cursor, '\n');
-                chat.cursor += 1;
-                None
-            }
-            KeyCode::Enter => {
-                if !chat.input.trim().is_empty() {
-                    Some(AppCmd::SendMessage)
+            2 => { // Command mode — clone command text before any mutation
+                let cmd_so_far = if let Mode::Command(s) = &chat.mode {
+                    s.clone()
                 } else {
-                    None
-                }
-            }
-            KeyCode::Backspace => {
-                if chat.cursor > 0 {
-                    let new_cursor = cursor_left(&chat.input, chat.cursor);
-                    chat.input.remove(new_cursor);
-                    chat.cursor = new_cursor;
-                }
-                None
-            }
-            // Ctrl+H is the terminal-conventional backspace (0x08). Some
-            // terminal emulators (including OpenBSD's) send it for Shift+Backspace.
-            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if chat.cursor > 0 {
-                    let new_cursor = cursor_left(&chat.input, chat.cursor);
-                    chat.input.remove(new_cursor);
-                    chat.cursor = new_cursor;
-                }
-                None
-            }
-            KeyCode::Char(c) => {
-                chat.input.insert(chat.cursor, c);
-                chat.cursor += c.len_utf8();
-                None
-            }
-            KeyCode::Tab => {
-                // Field borrow splitting: self.threads is separate from self.chat.
-                let threads = &self.threads;
-                let has_selection = chat.selected_message.is_some();
-                if let Some((start, end, candidates, display)) =
-                    completion_candidates(&chat.input, chat.cursor, threads, has_selection)
-                {
-                    if candidates.len() == 1 {
-                        let rep = candidates[0].clone();
-                        chat.input.replace_range(start..end, &rep);
-                        chat.cursor = start + rep.len();
-                        chat.autocomplete_hint = None;
-                    } else {
-                        let labels = display.as_deref().unwrap_or(&candidates);
-                        chat.autocomplete_hint = Some(labels.join("  "));
+                    return None;
+                };
+                match key.code {
+                    KeyCode::Esc => {
+                        chat.mode = Mode::Normal;
                     }
+                    KeyCode::Enter => {
+                        chat.mode = Mode::Normal;
+                        if !cmd_so_far.is_empty() {
+                            return Some(AppCmd::ExecCmd(cmd_so_far));
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if let Mode::Command(s) = &mut chat.mode {
+                            s.pop();
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if let Mode::Command(s) = &mut chat.mode {
+                            s.push(c);
+                        }
+                    }
+                    _ => {}
                 }
-                None
             }
-            _ => None,
+            _ => {}
         }
+        None
     }
 
     fn on_key_contacts(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
@@ -379,56 +473,29 @@ impl App {
     }
 }
 
-// ── Slash command registry ───────────────────────────────────────────────────
+// ── Colon command registry ────────────────────────────────────────────────────
 
-struct SlashCmdDef {
-    name: &'static str,
-    needs_selection: bool, // command requires a highlighted message as context
-    has_arg: bool,         // command takes text from the input bar
-}
-
-const SLASH_COMMANDS: &[SlashCmdDef] = &[
-    SlashCmdDef { name: "quit",  needs_selection: false, has_arg: false },
-    SlashCmdDef { name: "react", needs_selection: true,  has_arg: true  },
-    SlashCmdDef { name: "reply", needs_selection: true,  has_arg: true  },
-];
-
-enum SlashCmd<'a> {
+enum ColonCmd<'a> {
     Quit,
-    React(&'a str), // emoji/shortcode arg, possibly empty (empty = show reactions)
-    Reply(&'a str), // message body, possibly empty
+    React(&'a str), // emoji/shortcode arg; empty string means "show reactions"
 }
 
-impl SlashCmd<'_> {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Quit     => "quit",
-            Self::React(_) => "react",
-            Self::Reply(_) => "reply",
-        }
-    }
-
-    fn needs_selection(&self) -> bool {
-        matches!(self, Self::React(_) | Self::Reply(_))
-    }
-}
-
-fn parse_slash_cmd(input: &str) -> Option<SlashCmd<'_>> {
-    let s = input.trim().strip_prefix('/')?;
-    let (name, arg) = s.split_once(' ')
+fn parse_colon_cmd(input: &str) -> Option<ColonCmd<'_>> {
+    let s = input.trim().strip_prefix(':')?;
+    let (name, arg) = s
+        .split_once(' ')
         .map(|(n, a)| (n, a.trim()))
         .unwrap_or((s, ""));
     match name {
-        "quit"  => Some(SlashCmd::Quit),
-        "react" => Some(SlashCmd::React(arg)),
-        "reply" => Some(SlashCmd::Reply(arg)),
+        "quit"  => Some(ColonCmd::Quit),
+        "react" => Some(ColonCmd::React(arg)),
         _       => None,
     }
 }
 
 // ── Reaction helpers ──────────────────────────────────────────────────────────
 
-/// Resolve `/react <arg>` input to an emoji string.
+/// Resolve `:react <arg>` input to an emoji string.
 /// Non-ASCII input is treated as a raw emoji; ASCII input is looked up as a shortcode.
 fn resolve_emoji(arg: &str) -> Option<String> {
     let arg = arg.trim();
@@ -450,54 +517,14 @@ fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
 
 // ── Tab completion ────────────────────────────────────────────────────────────
 
-/// Returns (replace_start_byte, replace_end_byte, candidates) or None.
-///
-/// Slash command names: triggered when input[..cursor] starts with '/' with no space.
-/// /react <arg>:        triggered when input starts with "/react " and the rest is ASCII.
-/// @mentions:           triggered when a bare '@' token ends at cursor.
 // Returns (replace_start, replace_end, completion_values, display_labels).
-// display_labels is Some when the hint text should differ from the completion values
-// (e.g. emoji shortcodes annotated with the actual emoji character).
+// display_labels is Some when the hint text should differ from the completion values.
 fn completion_candidates(
     input: &str,
     cursor: usize,
     threads: &[ThreadEntry],
-    has_selection: bool,
 ) -> Option<(usize, usize, Vec<String>, Option<Vec<String>>)> {
     let before = &input[..cursor.min(input.len())];
-
-    // /react <shortcode> argument completion — must come before the command-name block
-    // because "/react w" starts with '/' and contains a space, so it won't reach below.
-    if let Some(rest) = before.strip_prefix("/react ") {
-        if has_selection && rest.is_ascii() {
-            let partial = rest.to_lowercase();
-            let mut pairs: Vec<(String, String)> = emojis::iter()
-                .flat_map(|e| {
-                    e.shortcodes()
-                        .filter(|s| s.starts_with(partial.as_str()))
-                        .map(move |s| (s.to_string(), format!("{} ({})", s, e)))
-                })
-                .collect();
-            pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            pairs.dedup_by(|a, b| a.0 == b.0);
-            if pairs.is_empty() { return None; }
-            let display = pairs.iter().map(|(_, d)| d.clone()).collect();
-            let candidates = pairs.into_iter().map(|(c, _)| c).collect();
-            return Some(("/react ".len(), cursor, candidates, Some(display)));
-        }
-    }
-
-    if before.starts_with('/') && !before.contains(' ') {
-        let partial = &before[1..];
-        let mut candidates: Vec<String> = SLASH_COMMANDS
-            .iter()
-            .filter(|d| d.name.starts_with(partial) && (has_selection || !d.needs_selection))
-            .map(|d| if d.has_arg { format!("/{} ", d.name) } else { format!("/{}", d.name) })
-            .collect();
-        candidates.sort();
-        if candidates.is_empty() { return None; }
-        return Some((0, cursor, candidates, None));
-    }
 
     if let Some(at_pos) = before.rfind('@') {
         let partial = &before[at_pos + 1..];
@@ -511,7 +538,9 @@ fn completion_candidates(
                 .map(|t| format!("@{} ", t.name))
                 .collect();
             candidates.sort();
-            if candidates.is_empty() { return None; }
+            if candidates.is_empty() {
+                return None;
+            }
             return Some((at_pos, cursor, candidates, None));
         }
     }
@@ -652,12 +681,10 @@ async fn execute_cmd<S: Store>(
             app.view = View::ChatList;
         }
         AppCmd::SendMessage => {
-            // Capture everything we need before mutably borrowing the manager.
-            let (text, thread, quote_info) = {
+            let (text, thread, reply_info, editing) = {
                 let chat = app.chat.as_mut().expect("SendMessage with no open chat");
                 chat.cursor = 0;
-                // Snapshot quote context from the selected message before clearing it.
-                let quote_info = chat.selected_message.and_then(|idx| {
+                let reply_info = chat.reply_to.and_then(|idx| {
                     let msg = chat.messages.get(idx)?;
                     Some((
                         msg.timestamp(),
@@ -665,59 +692,78 @@ async fn execute_cmd<S: Store>(
                         signal::message_body(msg),
                     ))
                 });
-                chat.selected_message = None;
-                (std::mem::take(&mut chat.input), chat.thread.clone(), quote_info)
+                let editing = chat.editing.take();
+                chat.reply_to = None;
+                (std::mem::take(&mut chat.input), chat.thread.clone(), reply_info, editing)
             };
 
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                match parse_slash_cmd(trimmed) {
-                    Some(cmd) => {
-                        if cmd.needs_selection() && quote_info.is_none() {
-                            if let Some(chat) = &mut app.chat {
-                                chat.autocomplete_hint = Some(format!(
-                                    "/{} requires a selected message — Shift+↑ to select",
-                                    cmd.name()
-                                ));
-                            }
+                if let Some((_idx, edit_ts)) = editing {
+                    signal::send_edit(manager, &thread, edit_ts, trimmed.to_string()).await?;
+                } else if let Some((q_ts, q_author, q_text)) = reply_info {
+                    signal::send_reply(manager, &thread, trimmed.to_string(), q_ts, q_author, q_text).await?;
+                } else {
+                    signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
+                }
+                reload_chat(manager, &thread, &mut app.chat).await;
+            }
+        }
+        AppCmd::ExecCmd(cmd_text) => {
+            let colon_input = format!(":{}", cmd_text);
+            let quote_info = app.chat.as_ref().and_then(|c| {
+                let idx = c.selected_message?;
+                let msg = c.messages.get(idx)?;
+                Some((
+                    msg.timestamp(),
+                    msg.metadata.sender.raw_uuid(),
+                    signal::message_body(msg),
+                ))
+            });
+            let thread = match app.chat.as_ref().map(|c| c.thread.clone()) {
+                Some(t) => t,
+                None => return Ok(()),
+            };
+
+            match parse_colon_cmd(&colon_input) {
+                Some(ColonCmd::Quit) => {
+                    app.quit = true;
+                }
+                Some(ColonCmd::React(arg)) if arg.is_empty() => {
+                    let hint = if let Some((target_ts, _, _)) = quote_info {
+                        if let Some(chat) = &app.chat {
+                            reaction_hint(&chat.reactions, target_ts)
                         } else {
-                            match cmd {
-                                SlashCmd::Quit => { app.quit = true; }
-                                SlashCmd::React(arg) if arg.is_empty() => {
-                                    if let Some((target_ts, _, _)) = quote_info {
-                                        if let Some(chat) = &mut app.chat {
-                                            let hint = reaction_hint(&chat.reactions, target_ts);
-                                            chat.autocomplete_hint = Some(hint);
-                                        }
-                                    }
-                                }
-                                SlashCmd::React(arg) => {
-                                    if let Some((target_ts, target_author, _)) = quote_info {
-                                        if let Some(emoji) = resolve_emoji(arg) {
-                                            let remove = app.own_aci
-                                                .and_then(|u| {
-                                                    app.chat.as_ref()?.reactions.get(&target_ts)?.get(&emoji)
-                                                        .map(|s| s.contains(u.as_bytes()))
-                                                })
-                                                .unwrap_or(false);
-                                            signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
-                                            reload_chat(manager, &thread, &mut app.chat).await;
-                                        }
-                                    }
-                                }
-                                SlashCmd::Reply(body) if !body.is_empty() => {
-                                    if let Some((q_ts, q_author, q_text)) = quote_info {
-                                        signal::send_reply(manager, &thread, body.to_string(), q_ts, q_author, q_text).await?;
-                                    }
-                                    reload_chat(manager, &thread, &mut app.chat).await;
-                                }
-                                SlashCmd::Reply(_) => {} // empty body, no-op
-                            }
+                            String::new()
                         }
+                    } else {
+                        "no message selected".to_string()
+                    };
+                    if let Some(chat) = &mut app.chat {
+                        chat.autocomplete_hint = Some(hint);
                     }
-                    None => {
-                        signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
-                        reload_chat(manager, &thread, &mut app.chat).await;
+                }
+                Some(ColonCmd::React(arg)) => {
+                    if let Some((target_ts, target_author, _)) = quote_info {
+                        if let Some(emoji) = resolve_emoji(arg) {
+                            let remove = app.own_aci
+                                .and_then(|u| {
+                                    app.chat.as_ref()?.reactions.get(&target_ts)?.get(&emoji)
+                                        .map(|s| s.contains(u.as_bytes()))
+                                })
+                                .unwrap_or(false);
+                            signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
+                            reload_chat(manager, &thread, &mut app.chat).await;
+                        } else if let Some(chat) = &mut app.chat {
+                            chat.autocomplete_hint = Some(format!("unknown emoji: {}", arg));
+                        }
+                    } else if let Some(chat) = &mut app.chat {
+                        chat.autocomplete_hint = Some("no message selected".to_string());
+                    }
+                }
+                None => {
+                    if let Some(chat) = &mut app.chat {
+                        chat.autocomplete_hint = Some(format!("unknown command: :{}", cmd_text));
                     }
                 }
             }

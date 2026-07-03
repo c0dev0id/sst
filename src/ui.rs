@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, List, ListItem, Paragraph};
 use ratatui::Frame;
 use presage::store::ContentExt;
 
-use crate::app::{App, View};
+use crate::app::{App, Mode, View};
 use crate::signal;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -27,7 +27,7 @@ fn draw_chat_list_screen(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
     draw_thread_list(f, app, chunks[0]);
-    draw_status_bar(f, chunks[1], "  ↑↓ navigate   PgUp/PgDn scroll   Enter open   n new chat   Q quit");
+    draw_status_bar(f, chunks[1], "  ↑↓ navigate   PgUp/PgDn scroll   Enter/→ open   n new chat   Q quit");
 }
 
 fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -127,11 +127,16 @@ fn draw_contact_list(f: &mut Frame, app: &mut App, area: Rect) {
 // ── Chat window ───────────────────────────────────────────────────────────────
 
 fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
-    let input_lines = app
-        .chat
-        .as_ref()
-        .map(|c| c.input.split('\n').count().max(1) as u16)
-        .unwrap_or(1);
+    // Normal and Command modes use a fixed 2-line input area (border + one hint/command line).
+    // Insert mode grows with the draft text.
+    let input_height = match app.chat.as_ref().map(|c| &c.mode) {
+        Some(Mode::Insert) => {
+            app.chat.as_ref()
+                .map(|c| c.input.split('\n').count().max(1) as u16 + 1)
+                .unwrap_or(2)
+        }
+        _ => 2,
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -139,7 +144,7 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(input_lines + 1), // +1 for top border
+            Constraint::Length(input_height),
         ])
         .split(f.area());
 
@@ -330,11 +335,10 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let (input, cursor) = app
-        .chat
-        .as_ref()
-        .map(|c| (c.input.as_str(), c.cursor))
-        .unwrap_or(("", 0));
+    let chat = match app.chat.as_ref() {
+        Some(c) => c,
+        None => return,
+    };
 
     let block = Block::default()
         .borders(ratatui::widgets::Borders::TOP)
@@ -342,52 +346,77 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // split('\n') preserves trailing newlines as an empty final element,
-    // unlike str::lines() which silently drops them.
-    let display_lines: Vec<&str> = if input.is_empty() {
-        vec![""]
-    } else {
-        input.split('\n').collect()
-    };
+    match &chat.mode {
+        Mode::Normal => {
+            f.render_widget(
+                Paragraph::new("  -- NORMAL --")
+                    .style(Style::default().fg(Color::DarkGray)),
+                inner,
+            );
+        }
+        Mode::Insert => {
+            let input = chat.input.as_str();
+            let cursor = chat.cursor;
 
-    // Cursor visual position: which line and char column.
-    let before_cursor = &input[..cursor.min(input.len())];
-    let cursor_parts: Vec<&str> = before_cursor.split('\n').collect();
-    let cursor_line = cursor_parts.len().saturating_sub(1);
-    let cursor_col = cursor_parts.last().map(|l| l.chars().count()).unwrap_or(0);
-
-    let mut text_lines: Vec<Line> = Vec::new();
-    for (i, line_text) in display_lines.iter().enumerate() {
-        let prefix = if i == 0 {
-            Span::styled("> ", Style::default().fg(Color::DarkGray))
-        } else {
-            Span::styled("  ", Style::default())
-        };
-
-        if i == cursor_line {
-            let chars: Vec<char> = line_text.chars().collect();
-            let before: String = chars[..cursor_col.min(chars.len())].iter().collect();
-            let cursor_char = if cursor_col < chars.len() {
-                chars[cursor_col].to_string()
+            // split('\n') preserves trailing newlines as an empty final element,
+            // unlike str::lines() which silently drops them.
+            let display_lines: Vec<&str> = if input.is_empty() {
+                vec![""]
             } else {
-                " ".to_string() // block at end of line / empty line
+                input.split('\n').collect()
             };
-            let after: String = chars[cursor_col.saturating_add(1).min(chars.len())..].iter().collect();
-            let mut spans = vec![
-                prefix,
-                Span::raw(before),
-                Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
-            ];
-            if !after.is_empty() {
-                spans.push(Span::raw(after));
+
+            let before_cursor = &input[..cursor.min(input.len())];
+            let cursor_parts: Vec<&str> = before_cursor.split('\n').collect();
+            let cursor_line = cursor_parts.len().saturating_sub(1);
+            let cursor_col = cursor_parts.last().map(|l| l.chars().count()).unwrap_or(0);
+
+            let mut text_lines: Vec<Line> = Vec::new();
+            for (i, line_text) in display_lines.iter().enumerate() {
+                let prefix = if i == 0 {
+                    Span::styled("> ", Style::default().fg(Color::DarkGray))
+                } else {
+                    Span::styled("  ", Style::default())
+                };
+
+                if i == cursor_line {
+                    let chars: Vec<char> = line_text.chars().collect();
+                    let before: String = chars[..cursor_col.min(chars.len())].iter().collect();
+                    let cursor_char = if cursor_col < chars.len() {
+                        chars[cursor_col].to_string()
+                    } else {
+                        " ".to_string()
+                    };
+                    let after: String =
+                        chars[cursor_col.saturating_add(1).min(chars.len())..].iter().collect();
+                    let mut spans = vec![
+                        prefix,
+                        Span::raw(before),
+                        Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+                    ];
+                    if !after.is_empty() {
+                        spans.push(Span::raw(after));
+                    }
+                    text_lines.push(Line::from(spans));
+                } else {
+                    text_lines.push(Line::from(vec![prefix, Span::raw(*line_text)]));
+                }
             }
-            text_lines.push(Line::from(spans));
-        } else {
-            text_lines.push(Line::from(vec![prefix, Span::raw(*line_text)]));
+
+            f.render_widget(Paragraph::new(Text::from(text_lines)), inner);
+        }
+        Mode::Command(cmd) => {
+            let chars: Vec<char> = cmd.chars().collect();
+            let cursor_char = " "; // block at end of command (cursor always trails)
+            let cmd_text: String = chars.iter().collect();
+            let line = Line::from(vec![
+                Span::styled(":", Style::default().fg(Color::DarkGray)),
+                Span::raw(cmd_text),
+                Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+            ]);
+            f.render_widget(Paragraph::new(Text::from(vec![line])), inner);
         }
     }
-
-    f.render_widget(Paragraph::new(Text::from(text_lines)), inner);
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────
@@ -397,20 +426,49 @@ fn chat_status_bar(app: &App) -> String {
         Some(c) => c,
         None => return String::new(),
     };
+
     if let Some(hint) = &chat.autocomplete_hint {
-        return format!("  Tab:  {}", hint);
+        return format!("  {}", hint);
     }
-    if let Some(sel_idx) = chat.selected_message {
-        if let Some(content) = chat.messages.get(sel_idx) {
-            let sender_uuid = content.metadata.sender.raw_uuid();
-            let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
-            let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
-            let ts = fmt_ts_long(content.timestamp());
-            let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
-            return format!("  [{}]  {}  ·  {}  |  /reply <text>↵   /react <emoji>   Shift+↑↓   Esc deselect", pos, sender, ts);
+
+    match &chat.mode {
+        Mode::Normal => {
+            if let Some(sel_idx) = chat.selected_message {
+                if let Some(content) = chat.messages.get(sel_idx) {
+                    let sender_uuid = content.metadata.sender.raw_uuid();
+                    let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+                    let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+                    let ts = fmt_ts_long(content.timestamp());
+                    let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
+                    return format!(
+                        "  [{}]  {}  ·  {}  |  r reply   e edit   : command   Esc deselect   q back",
+                        pos, sender, ts
+                    );
+                }
+            }
+            "  j/k navigate   r reply   e edit   : command   PgUp/PgDn scroll   q/← back".to_string()
+        }
+        Mode::Insert => {
+            if chat.editing.is_some() {
+                return "  -- INSERT -- editing   Esc cancel   Enter send   Shift+Enter newline".to_string();
+            }
+            if let Some(reply_idx) = chat.reply_to {
+                if let Some(content) = chat.messages.get(reply_idx) {
+                    let sender_uuid = content.metadata.sender.raw_uuid();
+                    let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+                    let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+                    return format!(
+                        "  -- INSERT -- replying to {}   Esc cancel   Enter send",
+                        sender
+                    );
+                }
+            }
+            "  -- INSERT --   Esc normal   Enter send   Shift+Enter newline   Tab @mention".to_string()
+        }
+        Mode::Command(_) => {
+            "  -- COMMAND --   Enter execute   Esc cancel".to_string()
         }
     }
-    "  ←→↑↓ cursor   PgUp/PgDn scroll   Shift+↑ select   Esc back   Enter send   Shift+Enter newline".to_string()
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, text: &str) {
