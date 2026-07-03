@@ -465,6 +465,44 @@ pub async fn load_messages<S: Store>(
 /// Single-pass load: splits the thread's message store into displayable messages
 /// and a reduced ReactionMap. Avoids two separate full scans when both are needed.
 ///
+/// Extract (target_sent_timestamp, new_body) from an EditMessage or a SyncMessage
+/// wrapping an edit (sent by us on another device). Returns None for all other content.
+fn extract_edit(content: &Content) -> Option<(u64, String)> {
+    match &content.body {
+        ContentBody::EditMessage(EditMessage {
+            target_sent_timestamp: Some(ts),
+            data_message: Some(dm),
+        }) => Some((*ts, data_message_body(dm))),
+        ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(Sent {
+                edit_message: Some(EditMessage {
+                    target_sent_timestamp: Some(ts),
+                    data_message: Some(dm),
+                }),
+                ..
+            }),
+            ..
+        }) => Some((*ts, data_message_body(dm))),
+        _ => None,
+    }
+}
+
+/// Replace the body text of a DataMessage or SyncMessage in-place.
+fn apply_edit_body(content: &mut Content, new_body: &str) {
+    match &mut content.body {
+        ContentBody::DataMessage(dm) => {
+            dm.body = Some(new_body.to_string());
+        }
+        ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(Sent { message: Some(dm), .. }),
+            ..
+        }) => {
+            dm.body = Some(new_body.to_string());
+        }
+        _ => {}
+    }
+}
+
 /// Reaction toggle semantics: events are processed in chronological order (ASC).
 /// The same (sender, emoji, target_ts) triple with remove=true undoes a prior add.
 pub async fn load_messages_and_reactions<S: Store>(
@@ -479,9 +517,18 @@ pub async fn load_messages_and_reactions<S: Store>(
 
     let mut messages: Vec<Content> = Vec::new();
     let mut events: Vec<(u64, [u8; 16], String, bool, u64)> = Vec::new();
+    // target_sent_timestamp → latest edited body. Store returns DESC, so the first
+    // EditMessage seen for a given target is the most recent edit.
+    let mut edits: HashMap<u64, String> = HashMap::new();
 
     for result in iter {
         let Ok(content) = result else { continue };
+
+        // Collect edit messages; they replace the original rather than appearing standalone.
+        if let Some((target_ts, new_body)) = extract_edit(&content) {
+            edits.entry(target_ts).or_insert(new_body);
+            continue;
+        }
 
         let reaction_opt = match &content.body {
             ContentBody::DataMessage(msg) => {
@@ -517,6 +564,13 @@ pub async fn load_messages_and_reactions<S: Store>(
     // Store returns DESC; both slices need ASC order.
     messages.reverse();
     events.reverse();
+
+    // Apply edits in-place: replace the body of the original message.
+    for msg in &mut messages {
+        if let Some(new_body) = edits.get(&msg.timestamp()) {
+            apply_edit_body(msg, new_body);
+        }
+    }
 
     let mut reactions: ReactionMap = HashMap::new();
     for (_, sender_bytes, emoji, remove, target_ts) in events {
