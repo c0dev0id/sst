@@ -589,19 +589,29 @@ pub async fn load_messages_and_reactions<S: Store>(
     Ok((messages, reactions))
 }
 
-/// Delete a single message locally. Signal has no server-side delete for DMs,
-/// so this only removes the entry from the local SQLite store.
-/// Returns true if a row was deleted, false if the timestamp wasn't found.
-pub async fn delete_message<S: Store>(
-    manager: &Manager<S, Registered>,
+/// Delete a message for everyone: sends a DataMessage.delete to the thread
+/// (Signal fans it out to all recipients/group members), then removes it from
+/// the local store. Only the original sender can delete their own messages.
+pub async fn delete_for_everyone<S: Store>(
+    manager: &mut Manager<S, Registered>,
     thread: &Thread,
     timestamp: u64,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<()> {
+    let ts = now_millis()?;
+    let data_message = DataMessage {
+        delete: Some(data_message::Delete {
+            target_sent_timestamp: Some(timestamp),
+        }),
+        timestamp: Some(ts),
+        ..Default::default()
+    };
+    dispatch_send(manager, thread, data_message, ts).await?;
     let mut store = manager.store().clone();
     store
         .delete_message(thread, timestamp)
         .await
-        .map_err(|e| anyhow::anyhow!("delete_message: {e}"))
+        .map_err(|e| anyhow::anyhow!("local delete_message: {e}"))?;
+    Ok(())
 }
 
 pub async fn send_reaction<S: Store>(

@@ -780,21 +780,30 @@ async fn execute_cmd<S: Store>(
             }
         }
         AppCmd::DeleteMessage => {
-            let (thread, timestamp, sel_idx) = match app.chat.as_ref() {
+            let (thread, timestamp, sel_idx, is_own) = match app.chat.as_ref() {
                 Some(chat) => {
                     let idx = match chat.selected_message {
                         Some(i) => i,
                         None => return Ok(()),
                     };
-                    let ts = match chat.messages.get(idx) {
-                        Some(m) => m.timestamp(),
+                    let msg = match chat.messages.get(idx) {
+                        Some(m) => m,
                         None => return Ok(()),
                     };
-                    (chat.thread.clone(), ts, idx)
+                    let own = app.own_aci
+                        .map(|a| a == msg.metadata.sender.raw_uuid())
+                        .unwrap_or(false);
+                    (chat.thread.clone(), msg.timestamp(), idx, own)
                 }
                 None => return Ok(()),
             };
-            signal::delete_message(&manager, &thread, timestamp).await?;
+            if !is_own {
+                if let Some(chat) = &mut app.chat {
+                    chat.autocomplete_hint = Some("can only delete own messages".to_string());
+                }
+                return Ok(());
+            }
+            signal::delete_for_everyone(manager, &thread, timestamp).await?;
             if let Some(chat) = &mut app.chat {
                 chat.messages.remove(sel_idx);
                 let new_len = chat.messages.len();
