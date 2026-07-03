@@ -701,8 +701,10 @@ async fn execute_cmd<S: Store>(
             if !trimmed.is_empty() {
                 if let Some((_idx, edit_ts)) = editing {
                     signal::send_edit(manager, &thread, edit_ts, trimmed.to_string()).await?;
+                    if let Some(c) = &mut app.chat { c.selected_message = None; }
                 } else if let Some((q_ts, q_author, q_text)) = reply_info {
                     signal::send_reply(manager, &thread, trimmed.to_string(), q_ts, q_author, q_text).await?;
+                    if let Some(c) = &mut app.chat { c.selected_message = None; }
                 } else {
                     signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
                 }
