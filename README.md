@@ -82,21 +82,29 @@ Press `n` from the Chat List to open a full-screen picker of all synced contacts
    > Sure, sounds good!
    Perfect, see you then!
 ────────────────────────────────────────────
-  ←→↑↓ cursor  PgUp/PgDn scroll  ...        ← status bar
+  j/k navigate   r reply   e edit   d delete   : command   q/← back
 ────────────────────────────────────────────
- > |                                        ← input bar
+  -- NORMAL --                              ← input bar (mode indicator)
 ```
 
 Long lines are word-wrapped to the terminal width.
 
-### Message area
+The chat window is modal (vim-style). It opens in **Normal** mode.
+
+### Normal mode
 
 | Key | Action |
 |-----|--------|
-| PgUp / PgDn | Scroll up / down |
-| Shift+↑ | Select most recent message / move selection toward older |
-| Shift+↓ | Move selection toward newer (no-op when at newest) |
-| Esc | Clear selection (first press); return to Chat List (second press) |
+| `j` / ↓ | Move selection to newer message |
+| `k` / ↑ | Move selection to older message |
+| PgUp / PgDn | Scroll message area |
+| `i` | Enter Insert mode (compose) |
+| `:` | Enter Command mode |
+| `r` | Reply to selected message (enters Insert mode) |
+| `e` | Edit selected own message (enters Insert mode) |
+| `d` | Delete selected message (local only) |
+| Esc | Deselect message |
+| `q` / ← | Return to Chat List |
 
 Consecutive messages from the same sender are grouped under one header block. An `── date time ──` separator is inserted when the gap between messages exceeds one hour.
 
@@ -106,9 +114,9 @@ Own sent messages show a receipt indicator on the last line:
 - `✓` — delivered
 - `✓✓` — read
 
-### Input bar
+### Insert mode
 
-Always focused. Grows vertically as content requires (no line cap). A block cursor shows the insert position.
+Entered via `i`, `r` (reply), or `e` (edit). Grows vertically as content requires. A block cursor shows the insert position.
 
 | Key | Action |
 |-----|--------|
@@ -117,41 +125,31 @@ Always focused. Grows vertically as content requires (no line cap). A block curs
 | ← / → | Move cursor left / right |
 | ↑ / ↓ | Move cursor up / down (multi-line) |
 | Backspace | Delete character left of cursor |
-| Tab | Complete slash command, @mention, or emoji shortcode |
-| Esc | Clear selection / return to Chat List |
-
-Tab completes immediately on a unique match. With multiple candidates, all matches are shown on the status bar.
-
-### Slash commands
-
-Slash commands are available in the input bar. Commands that require a selected message show an error on the status bar if none is active.
-
-| Command | Requires selection | Action |
-|---------|-------------------|--------|
-| `/quit` | No | Exit the app |
-| `/reply <text>` | Yes | Send `<text>` as a quoted reply |
-| `/react <emoji>` | Yes | React to the selected message |
-| `/react` | Yes | Show existing reaction counts on the status bar |
-
-`/react` accepts either a raw emoji (`/react ❤️`) or a gemoji shortcode (`/react wave` → 👋). Sending the same emoji twice toggles it off.
-
-Tab-completion for `/react <shortcode>`:
-- `/react <Tab>` shows all available shortcodes with their emoji on the status bar
-- `/react w<Tab>` narrows to shortcodes starting with `w` (e.g. `wave (👋)  weary (😩)`)
-- Completes immediately when the partial matches exactly one shortcode
-
-### @mention completion
+| Tab | Complete @mention |
+| Esc | Return to Normal mode (discards input) |
 
 `@ali` + Tab completes to `@Alice Wagner ` when it is the only match among known contacts. `@` + Tab lists all candidates on the status bar.
+
+### Command mode
+
+Entered via `:`. Commands are typed and submitted with Enter.
+
+| Command | Action |
+|---------|--------|
+| `:quit` | Exit the app |
+| `:react <emoji>` | React to the selected message |
+| `:react` | Show existing reaction counts on the status bar |
+
+`:react` accepts either a raw emoji (`:react ❤️`) or a gemoji shortcode (`:react wave` → 👋). Sending the same emoji twice toggles it off.
 
 ---
 
 ## Status bar
 
-Shows key hints by default. After Tab, completion candidates are shown (clears on the next keystroke). While a message is selected, shows sender, timestamp, and position — Tab candidates take priority over the selection info:
+Shows key hints by default. While a message is selected, shows sender, timestamp, and position:
 
 ```
-  [3/17]  Alice Wagner  ·  2026-06-28 09:14  |  /reply <text>↵   /react <emoji>   Shift+↑↓   Esc deselect
+  [3/17]  Alice Wagner  ·  2026-06-28 09:14  |  r reply   e edit   d delete   : command   Esc deselect   q back
 ```
 
 ---

@@ -52,6 +52,7 @@ pub enum AppCmd {
     RefreshThreadList,
     SendMessage,
     ExecCmd(String), // colon command text (without leading ':')
+    DeleteMessage,
 }
 
 pub struct App {
@@ -246,6 +247,14 @@ impl App {
                                         Some("can only edit own messages".to_string());
                                 }
                             }
+                        } else {
+                            chat.autocomplete_hint =
+                                Some("select a message first (j/k)".to_string());
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if chat.selected_message.is_some() {
+                            return Some(AppCmd::DeleteMessage);
                         } else {
                             chat.autocomplete_hint =
                                 Some("select a message first (j/k)".to_string());
@@ -768,6 +777,32 @@ async fn execute_cmd<S: Store>(
                         chat.autocomplete_hint = Some(format!("unknown command: :{}", cmd_text));
                     }
                 }
+            }
+        }
+        AppCmd::DeleteMessage => {
+            let (thread, timestamp, sel_idx) = match app.chat.as_ref() {
+                Some(chat) => {
+                    let idx = match chat.selected_message {
+                        Some(i) => i,
+                        None => return Ok(()),
+                    };
+                    let ts = match chat.messages.get(idx) {
+                        Some(m) => m.timestamp(),
+                        None => return Ok(()),
+                    };
+                    (chat.thread.clone(), ts, idx)
+                }
+                None => return Ok(()),
+            };
+            signal::delete_message(&manager, &thread, timestamp).await?;
+            if let Some(chat) = &mut app.chat {
+                chat.messages.remove(sel_idx);
+                let new_len = chat.messages.len();
+                chat.selected_message = if new_len == 0 {
+                    None
+                } else {
+                    Some(sel_idx.min(new_len - 1))
+                };
             }
         }
     }

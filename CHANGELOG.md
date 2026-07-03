@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Vim-style modal navigation in the chat window: Normal mode (default on open), Insert mode (`i`), Command mode (`:`). Normal mode uses `j`/`k` to select messages, `r` to reply, `e` to edit own messages, `d` to delete, `:` for colon commands, `q`/`←` to return to chat list.
+- Single-message local deletion: `d` in Normal mode with a selected message deletes it from the local SQLite store immediately (local-only; Signal has no server-side delete for DMs).
+- Colon command dispatch (`:react <emoji|shortcode>`, `:react`, `:quit`) replaces the old slash command system.
+
 ### Fixed
 - Starting a second sst instance while one is already running would silently corrupt the Signal session, causing messages to appear sent locally but never arrive on other devices. sst now acquires an exclusive `flock`-based lock on startup and exits immediately with a clear error if another instance holds it.
 

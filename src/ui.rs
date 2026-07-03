@@ -441,12 +441,12 @@ fn chat_status_bar(app: &App) -> String {
                     let ts = fmt_ts_long(content.timestamp());
                     let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
                     return format!(
-                        "  [{}]  {}  ·  {}  |  r reply   e edit   : command   Esc deselect   q back",
+                        "  [{}]  {}  ·  {}  |  r reply   e edit   d delete   : command   Esc deselect   q back",
                         pos, sender, ts
                     );
                 }
             }
-            "  j/k navigate   r reply   e edit   : command   PgUp/PgDn scroll   q/← back".to_string()
+            "  j/k navigate   r reply   e edit   d delete   : command   PgUp/PgDn scroll   q/← back".to_string()
         }
         Mode::Insert => {
             if chat.editing.is_some() {
