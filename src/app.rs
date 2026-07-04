@@ -378,6 +378,24 @@ impl App {
                             return Some(AppCmd::ExecCmd(cmd_so_far));
                         }
                     }
+                    KeyCode::Tab => {
+                        // Only complete the command name itself (no space typed yet).
+                        if !cmd_so_far.contains(' ') {
+                            let partial = cmd_so_far.to_lowercase();
+                            let matches: Vec<&&str> = COLON_COMMANDS
+                                .iter()
+                                .filter(|c| c.starts_with(partial.as_str()))
+                                .collect();
+                            if matches.len() == 1 {
+                                chat.mode = Mode::Command(matches[0].to_string());
+                                chat.autocomplete_hint = None;
+                            } else if !matches.is_empty() {
+                                chat.autocomplete_hint = Some(
+                                    matches.iter().map(|c| format!(":{}", c)).collect::<Vec<_>>().join("  ")
+                                );
+                            }
+                        }
+                    }
                     KeyCode::Backspace => {
                         if let Mode::Command(s) = &mut chat.mode {
                             s.pop();
@@ -484,6 +502,8 @@ impl App {
 }
 
 // ── Colon command registry ────────────────────────────────────────────────────
+
+const COLON_COMMANDS: &[&str] = &["quit", "react"];
 
 enum ColonCmd<'a> {
     Quit,
