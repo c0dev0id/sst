@@ -44,6 +44,7 @@ pub struct ChatState {
     pub mode: Mode,
     pub reply_to: Option<usize>,           // message index set by 'r' in Normal mode
     pub editing: Option<(usize, u64)>,     // (message index, timestamp) set by 'e' in Normal mode
+    pub mention_names: Vec<String>,        // resolved names for @mention completion
 }
 
 pub enum AppCmd {
@@ -96,6 +97,7 @@ impl App {
         delivered: HashSet<u64>,
         read: HashSet<u64>,
         reactions: ReactionMap,
+        mention_names: Vec<String>,
     ) {
         self.chat = Some(ChatState {
             thread,
@@ -113,6 +115,7 @@ impl App {
             mode: Mode::Normal,
             reply_to: None,
             editing: None,
+            mention_names,
         });
         self.view = View::ChatWindow;
     }
@@ -342,10 +345,8 @@ impl App {
                         chat.cursor += c.len_utf8();
                     }
                     KeyCode::Tab => {
-                        // Field borrow splitting: self.threads is separate from self.chat.
-                        let threads = &self.threads;
                         if let Some((start, end, candidates, display)) =
-                            completion_candidates(&chat.input, chat.cursor, threads)
+                            completion_candidates(&chat.input, chat.cursor, &chat.mention_names)
                         {
                             if candidates.len() == 1 {
                                 let rep = candidates[0].clone();
@@ -531,7 +532,7 @@ fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
 fn completion_candidates(
     input: &str,
     cursor: usize,
-    threads: &[ThreadEntry],
+    mention_names: &[String],
 ) -> Option<(usize, usize, Vec<String>, Option<Vec<String>>)> {
     let before = &input[..cursor.min(input.len())];
 
@@ -539,14 +540,11 @@ fn completion_candidates(
         let partial = &before[at_pos + 1..];
         if !partial.contains(' ') {
             let partial_lower = partial.to_lowercase();
-            let mut candidates: Vec<String> = threads
+            let candidates: Vec<String> = mention_names
                 .iter()
-                .filter(|t| matches!(t.thread, Thread::Contact(_)))
-                .filter(|t| t.name != "Note to Self")
-                .filter(|t| t.name.to_lowercase().starts_with(&partial_lower))
-                .map(|t| format!("@{} ", t.name))
+                .filter(|n| n.to_lowercase().starts_with(&partial_lower))
+                .map(|n| format!("@{} ", n))
                 .collect();
-            candidates.sort();
             if candidates.is_empty() {
                 return None;
             }
@@ -652,6 +650,7 @@ async fn execute_cmd<S: Store>(
             let (delivered, read) = signal::load_receipt_state(manager, &thread)
                 .await
                 .unwrap_or_default();
+            let mention_names = signal::load_mention_names(manager, &thread, app.own_aci).await;
 
             let own_aci = app.own_aci;
             let to_ack: Vec<u64> = messages
@@ -660,7 +659,7 @@ async fn execute_cmd<S: Store>(
                 .map(|m| m.timestamp())
                 .collect();
 
-            app.open_chat(thread.clone(), name, messages, delivered, read, reactions);
+            app.open_chat(thread.clone(), name, messages, delivered, read, reactions, mention_names);
 
             if let Err(e) = signal::send_read_receipt(manager, &thread, to_ack).await {
                 tracing::warn!("send_read_receipt: {e}");

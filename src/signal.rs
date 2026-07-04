@@ -454,6 +454,41 @@ pub async fn lookup_contact_name<S: Store>(
     }
 }
 
+/// Returns display names for @mention completion in the given thread.
+/// For groups: all members except the account owner, resolved to contact names.
+/// For 1:1: the single contact's name.
+pub async fn load_mention_names<S: Store>(
+    manager: &Manager<S, Registered>,
+    thread: &Thread,
+    own_aci: Option<Uuid>,
+) -> Vec<String> {
+    match thread {
+        Thread::Group(key) => {
+            let Ok(Some(group)) = manager.store().group(*key).await else {
+                return Vec::new();
+            };
+            let mut names = Vec::new();
+            for member in &group.members {
+                let uuid = presage::libsignal_service::protocol::ServiceId::Aci(member.aci)
+                    .raw_uuid();
+                if own_aci == Some(uuid) {
+                    continue;
+                }
+                names.push(lookup_contact_name(manager, uuid).await);
+            }
+            names.sort();
+            names
+        }
+        Thread::Contact(service_id) => {
+            let uuid = service_id.raw_uuid();
+            if own_aci == Some(uuid) {
+                return Vec::new();
+            }
+            vec![lookup_contact_name(manager, uuid).await]
+        }
+    }
+}
+
 pub async fn load_messages<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
