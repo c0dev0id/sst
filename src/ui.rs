@@ -332,8 +332,13 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let scroll_row = total.saturating_sub(height).saturating_sub(chat.scroll) as u16;
-    f.render_widget(Paragraph::new(Text::from(lines)).scroll((scroll_row, 0)), area);
+    let scroll_row = total.saturating_sub(height).saturating_sub(chat.scroll);
+    // Track which message index is at the top of the viewport so Normal-mode
+    // ↓ can start selection there rather than at index 0.
+    chat.viewport_top_msg = msg_visual_starts
+        .partition_point(|&s| s <= scroll_row)
+        .saturating_sub(1);
+    f.render_widget(Paragraph::new(Text::from(lines)).scroll((scroll_row as u16, 0)), area);
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {

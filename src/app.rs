@@ -34,6 +34,7 @@ pub struct ChatState {
     pub messages: Vec<Content>,
     pub scroll: usize,
     pub viewport_height: u16,
+    pub viewport_top_msg: usize,            // index of first visible message, written by renderer
     pub input: String,
     pub cursor: usize,                     // byte offset into `input`
     pub selected_message: Option<usize>,   // index into `messages`
@@ -106,6 +107,7 @@ impl App {
             messages,
             scroll: 0,
             viewport_height: 0,
+            viewport_top_msg: 0,
             input: String::new(),
             cursor: 0,
             selected_message: None,
@@ -289,10 +291,11 @@ impl App {
                         }
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        if let Some(sel) = chat.selected_message {
-                            if sel + 1 < chat.messages.len() {
-                                chat.selected_message = Some(sel + 1);
-                            }
+                        if !chat.messages.is_empty() {
+                            chat.selected_message = Some(match chat.selected_message {
+                                Some(sel) => (sel + 1).min(chat.messages.len() - 1),
+                                None => chat.viewport_top_msg,
+                            });
                         }
                     }
                     KeyCode::PageUp => {
