@@ -120,8 +120,8 @@ Entered via `i`, `r` (reply), or `e` (edit). Grows vertically as content require
 
 | Key | Action |
 |-----|--------|
-| Enter | Insert newline |
-| Shift+Enter | Send message |
+| Enter | Send message |
+| Shift+Enter | Insert newline |
 | ← / → | Move cursor left / right |
 | ↑ / ↓ | Move cursor up / down (multi-line) |
 | Backspace | Delete character left of cursor |

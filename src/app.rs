@@ -133,6 +133,13 @@ impl App {
         self.list_state.select(Some(idx.min(self.threads.len() - 1)));
     }
 
+    pub fn on_paste(&mut self, text: String) {
+        let Some(chat) = self.chat.as_mut() else { return };
+        if !matches!(chat.mode, Mode::Insert) { return }
+        chat.input.insert_str(chat.cursor, &text);
+        chat.cursor += text.len();
+    }
+
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
         if key.kind != KeyEventKind::Press {
             return None;
@@ -325,13 +332,13 @@ impl App {
                         chat.scroll = chat.scroll.saturating_sub(h);
                     }
                     KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        chat.input.insert(chat.cursor, '\n');
+                        chat.cursor += 1;
+                    }
+                    KeyCode::Enter => {
                         if !chat.input.trim().is_empty() {
                             return Some(AppCmd::SendMessage);
                         }
-                    }
-                    KeyCode::Enter => {
-                        chat.input.insert(chat.cursor, '\n');
-                        chat.cursor += 1;
                     }
                     KeyCode::Backspace => {
                         if chat.cursor > 0 {
@@ -856,7 +863,11 @@ pub async fn run<S: Store>(
 ) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableBracketedPaste,
+    )?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -876,6 +887,9 @@ pub async fn run<S: Store>(
                             if let Some(cmd) = app.on_key(key) {
                                 execute_cmd(&mut app, &mut manager, cmd).await?;
                             }
+                        }
+                        Some(Ok(Event::Paste(text))) => {
+                            app.on_paste(text);
                         }
                         Some(Err(e)) => return Err(anyhow::anyhow!(e)),
                         _ => {}
@@ -942,7 +956,8 @@ pub async fn run<S: Store>(
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
+        crossterm::event::DisableBracketedPaste,
+        crossterm::terminal::LeaveAlternateScreen,
     )?;
 
     result

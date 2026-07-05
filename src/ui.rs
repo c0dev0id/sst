@@ -450,7 +450,7 @@ fn chat_status_bar(app: &App) -> String {
         }
         Mode::Insert => {
             if chat.editing.is_some() {
-                return "  -- INSERT -- editing   Esc cancel   Shift+Enter send   Enter newline".to_string();
+                return "  -- INSERT -- editing   Esc cancel   Enter send   Shift+Enter newline".to_string();
             }
             if let Some(reply_idx) = chat.reply_to {
                 if let Some(content) = chat.messages.get(reply_idx) {
@@ -458,12 +458,12 @@ fn chat_status_bar(app: &App) -> String {
                     let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
                     let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
                     return format!(
-                        "  -- INSERT -- replying to {}   Esc cancel   Shift+Enter send",
+                        "  -- INSERT -- replying to {}   Esc cancel   Enter send",
                         sender
                     );
                 }
             }
-            "  -- INSERT --   Esc normal   Shift+Enter send   Enter newline   Tab @mention".to_string()
+            "  -- INSERT --   Esc normal   Enter send   Shift+Enter newline   Tab @mention".to_string()
         }
         Mode::Command(_) => {
             "  -- COMMAND --   Enter execute   Esc cancel".to_string()
