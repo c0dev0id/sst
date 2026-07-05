@@ -27,7 +27,7 @@ fn draw_chat_list_screen(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
     draw_thread_list(f, app, chunks[0]);
-    draw_status_bar(f, chunks[1], "  ↑↓ navigate   PgUp/PgDn scroll   Enter/→ open   n new chat   Q quit");
+    draw_status_bar(f, chunks[1], "  j/k/↑↓ navigate   PgUp/PgDn scroll   l/Enter/→ open   n new chat   Q quit");
 }
 
 fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -84,7 +84,7 @@ fn draw_contact_browser_screen(f: &mut Frame, app: &mut App) {
     f.render_widget(header, chunks[0]);
 
     draw_contact_list(f, app, chunks[1]);
-    draw_status_bar(f, chunks[2], "  ↑↓ navigate   PgUp/PgDn scroll   Enter open   Esc back");
+    draw_status_bar(f, chunks[2], "  j/k/↑↓ navigate   PgUp/PgDn scroll   l/Enter open   h/Esc back");
 }
 
 fn draw_contact_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -448,7 +448,7 @@ fn chat_status_bar(app: &App) -> String {
                     );
                 }
             }
-            "  j/k navigate   r reply   e edit   d delete   : command   PgUp/PgDn scroll   q/← back".to_string()
+            "  j/k/↑↓ navigate   r reply   e edit   dd delete   : command   PgUp/PgDn scroll   h/q/← back".to_string()
         }
         Mode::Insert => {
             if chat.editing.is_some() {

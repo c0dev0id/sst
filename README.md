@@ -32,9 +32,9 @@ Lines are truncated with `…` when they exceed the terminal width.
 
 | Key | Action |
 |-----|--------|
-| ↑ / ↓ | Navigate |
+| `j` / `k` / ↑ / ↓ | Navigate |
 | PgUp / PgDn | Scroll |
-| Enter | Open chat |
+| `l` / Enter / → | Open chat |
 | `n` | Open contact browser (new chat) |
 | `Q` | Quit |
 
@@ -55,10 +55,10 @@ Press `n` from the Chat List to open a full-screen picker of all synced contacts
 
 | Key | Action |
 |-----|--------|
-| ↑ / ↓ | Navigate |
+| `j` / `k` / ↑ / ↓ | Navigate |
 | PgUp / PgDn | Scroll |
-| Enter | Open chat |
-| Esc / q | Back to Chat List |
+| `l` / Enter / → | Open chat |
+| `h` / Esc / `q` / ← | Back to Chat List |
 
 ---
 
@@ -104,7 +104,7 @@ The chat window is modal (vim-style). It opens in **Normal** mode.
 | `e` | Edit selected own message (enters Insert mode) |
 | `dd` | Delete selected own message for everyone |
 | Esc | Deselect message |
-| `q` / ← | Return to Chat List |
+| `h` / `q` / ← | Return to Chat List |
 
 Consecutive messages from the same sender are grouped under one header block. An `── date time ──` separator is inserted when the gap between messages exceeds one hour.
 

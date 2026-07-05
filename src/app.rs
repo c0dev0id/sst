@@ -158,12 +158,12 @@ impl App {
                 self.quit = true;
                 None
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let next = self.selected().map(|i| i + 1).unwrap_or(0);
                 self.select(next);
                 None
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let prev = self.selected().and_then(|i| i.checked_sub(1)).unwrap_or(0);
                 self.select(prev);
                 None
@@ -179,7 +179,7 @@ impl App {
                 None
             }
             KeyCode::Char('n') => Some(AppCmd::OpenContactBrowser),
-            KeyCode::Enter | KeyCode::Right => {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 self.selected().and_then(|idx| {
                     let t = self.threads.get(idx)?;
                     Some(AppCmd::OpenChat { thread: t.thread.clone(), name: t.name.clone() })
@@ -193,7 +193,7 @@ impl App {
         // Keys that need to set self.chat = None must fire before any borrow of self.chat.
         if matches!(self.chat.as_ref()?.mode, Mode::Normal) {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Left => {
+                KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                     self.chat = None;
                     return Some(AppCmd::RefreshThreadList);
                 }
@@ -437,21 +437,21 @@ impl App {
         let sep = self.contacts_split; // display index of the separator row
 
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Char('h') | KeyCode::Left => {
                 Some(AppCmd::RefreshThreadList)
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
                 None
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let cur = self.contact_list_state.selected().unwrap_or(0);
                 let mut next = (cur + 1).min(total.saturating_sub(1));
                 if has_sep && next == sep { next = (next + 1).min(total - 1); }
                 self.contact_list_state.select(Some(next));
                 None
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let cur = self.contact_list_state.selected().unwrap_or(0);
                 if cur == 0 { return None; }
                 let mut prev = cur - 1;
@@ -473,7 +473,7 @@ impl App {
                 self.contact_list_state.select(Some(prev));
                 None
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
                 let display_idx = self.contact_list_state.selected()?;
                 // Map display index to data index (skip separator row).
                 let data_idx = if has_sep {
