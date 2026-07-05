@@ -128,14 +128,20 @@ fn draw_contact_list(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
     // Normal and Command modes use a fixed 2-line input area (border + one hint/command line).
-    // Insert mode grows with the draft text.
-    let input_height = match app.chat.as_ref().map(|c| &c.mode) {
-        Some(Mode::Insert) => {
-            app.chat.as_ref()
-                .map(|c| c.input.split('\n').count().max(1) as u16 + 1)
-                .unwrap_or(2)
+    // Insert mode grows with the draft text, accounting for word-wrap at the current width.
+    let input_height = if let Some(chat) = app.chat.as_ref() {
+        if matches!(chat.mode, Mode::Insert) {
+            let wrap_width = f.area().width.saturating_sub(2) as usize;
+            let visual_lines: usize = chat.input.split('\n')
+                .map(|l| wrap_input_line(l, wrap_width).len())
+                .sum::<usize>()
+                .max(1);
+            visual_lines as u16 + 1
+        } else {
+            2
         }
-        _ => 2,
+    } else {
+        2
     };
 
     let chunks = Layout::default()
@@ -364,6 +370,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Mode::Insert => {
             let input = chat.input.as_str();
             let cursor = chat.cursor;
+            // subtract 2 for the "> " / "  " prefix
+            let wrap_width = inner.width.saturating_sub(2) as usize;
 
             // split('\n') preserves trailing newlines as an empty final element,
             // unlike str::lines() which silently drops them.
@@ -379,34 +387,59 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             let cursor_col = cursor_parts.last().map(|l| l.chars().count()).unwrap_or(0);
 
             let mut text_lines: Vec<Line> = Vec::new();
-            for (i, line_text) in display_lines.iter().enumerate() {
-                let prefix = if i == 0 {
-                    Span::styled("> ", Style::default().fg(Color::DarkGray))
-                } else {
-                    Span::styled("  ", Style::default())
-                };
+            let mut visual_row = 0usize;
 
-                if i == cursor_line {
-                    let chars: Vec<char> = line_text.chars().collect();
-                    let before: String = chars[..cursor_col.min(chars.len())].iter().collect();
-                    let cursor_char = if cursor_col < chars.len() {
-                        chars[cursor_col].to_string()
+            for (logical_i, line_text) in display_lines.iter().enumerate() {
+                let sub_lines = wrap_input_line(line_text, wrap_width);
+                let sub_count = sub_lines.len();
+
+                for sub_j in 0..sub_count {
+                    let (ref sub_text, sub_start) = sub_lines[sub_j];
+                    let prefix = if visual_row == 0 {
+                        Span::styled("> ", Style::default().fg(Color::DarkGray))
                     } else {
-                        " ".to_string()
+                        Span::styled("  ", Style::default())
                     };
-                    let after: String =
-                        chars[cursor_col.saturating_add(1).min(chars.len())..].iter().collect();
-                    let mut spans = vec![
-                        prefix,
-                        Span::raw(before),
-                        Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
-                    ];
-                    if !after.is_empty() {
-                        spans.push(Span::raw(after));
+
+                    if logical_i == cursor_line {
+                        let next_sub_start = if sub_j + 1 < sub_count {
+                            sub_lines[sub_j + 1].1
+                        } else {
+                            line_text.chars().count()
+                        };
+                        let cursor_here = if sub_j + 1 < sub_count {
+                            cursor_col >= sub_start && cursor_col < next_sub_start
+                        } else {
+                            cursor_col >= sub_start
+                        };
+
+                        if cursor_here {
+                            let col_in_sub = cursor_col - sub_start;
+                            let chars: Vec<char> = sub_text.chars().collect();
+                            let before: String = chars[..col_in_sub.min(chars.len())].iter().collect();
+                            let cursor_char = chars.get(col_in_sub)
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| " ".to_string());
+                            let after: String = chars[col_in_sub.saturating_add(1).min(chars.len())..]
+                                .iter()
+                                .collect();
+                            let mut spans = vec![
+                                prefix,
+                                Span::raw(before),
+                                Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+                            ];
+                            if !after.is_empty() {
+                                spans.push(Span::raw(after));
+                            }
+                            text_lines.push(Line::from(spans));
+                        } else {
+                            text_lines.push(Line::from(vec![prefix, Span::raw(sub_text.clone())]));
+                        }
+                    } else {
+                        text_lines.push(Line::from(vec![prefix, Span::raw(sub_text.clone())]));
                     }
-                    text_lines.push(Line::from(spans));
-                } else {
-                    text_lines.push(Line::from(vec![prefix, Span::raw(*line_text)]));
+
+                    visual_row += 1;
                 }
             }
 
@@ -526,6 +559,45 @@ fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
         lines.push(String::new());
     }
     lines
+}
+
+/// Word-wraps one logical input line, preserving char offsets for cursor mapping.
+/// Returns Vec of (visual_sub_line_text, char_start_offset_in_original).
+/// Breaks at word boundaries; trailing spaces from a break are kept on the preceding sub-line.
+/// Long words that exceed max_width are hard-broken.
+fn wrap_input_line(text: &str, max_width: usize) -> Vec<(String, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if max_width == 0 || n <= max_width {
+        return vec![(text.to_string(), 0)];
+    }
+    let mut result = Vec::new();
+    let mut start = 0usize;
+    while start < n {
+        let remaining = n - start;
+        if remaining <= max_width {
+            result.push((chars[start..].iter().collect(), start));
+            break;
+        }
+        let end = start + max_width;
+        // Search backwards from end-1 for a space to use as a word-boundary break.
+        // The space is included in the current sub-line; next sub-line starts after it.
+        let mut break_pos = end;
+        let mut next_start = end;
+        for j in (start..end).rev() {
+            if chars[j] == ' ' {
+                break_pos = j + 1;
+                next_start = j + 1;
+                break;
+            }
+        }
+        result.push((chars[start..break_pos].iter().collect(), start));
+        start = next_start;
+    }
+    if result.is_empty() {
+        result.push((String::new(), 0));
+    }
+    result
 }
 
 fn fmt_ts_short(ts_ms: u64) -> String {
