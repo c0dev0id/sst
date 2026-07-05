@@ -201,8 +201,7 @@ impl App {
         if key.code != KeyCode::Tab {
             chat.autocomplete_hint = None;
         }
-        // Any key other than 'd' in Normal mode cancels a pending 'dd'.
-        if chat.pending_d && !(matches!(chat.mode, Mode::Normal) && key.code == KeyCode::Char('d')) {
+        if chat.pending_d && (!matches!(chat.mode, Mode::Normal) || key.code != KeyCode::Char('d')) {
             chat.pending_d = false;
         }
 
@@ -235,7 +234,7 @@ impl App {
                             chat.cursor = chat.input.len();
                             chat.mode = Mode::Insert;
                         } else {
-                            chat.autocomplete_hint = Some("select a message first (j/k)".to_string());
+                            chat.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
                     KeyCode::Char('e') => {
@@ -258,13 +257,13 @@ impl App {
                             }
                         } else {
                             chat.autocomplete_hint =
-                                Some("select a message first (j/k)".to_string());
+                                Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
                     KeyCode::Char('d') => {
                         if chat.selected_message.is_none() {
                             chat.autocomplete_hint =
-                                Some("select a message first (j/k)".to_string());
+                                Some(HINT_SELECT_FIRST.to_string());
                         } else if chat.pending_d {
                             chat.pending_d = false;
                             return Some(AppCmd::DeleteMessage);
@@ -389,11 +388,11 @@ impl App {
                         }
                     }
                     KeyCode::Tab => {
-                        // Only complete the command name itself (no space typed yet).
                         if !cmd_so_far.contains(' ') {
                             let partial = cmd_so_far.to_lowercase();
-                            let matches: Vec<&&str> = COLON_COMMANDS
+                            let matches: Vec<&str> = COLON_COMMANDS
                                 .iter()
+                                .copied()
                                 .filter(|c| c.starts_with(partial.as_str()))
                                 .collect();
                             if matches.len() == 1 {
@@ -514,6 +513,7 @@ impl App {
 // ── Colon command registry ────────────────────────────────────────────────────
 
 const COLON_COMMANDS: &[&str] = &["quit", "react"];
+const HINT_SELECT_FIRST: &str = "select a message first (j/k)";
 
 enum ColonCmd<'a> {
     Quit,
