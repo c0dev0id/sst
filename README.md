@@ -102,7 +102,7 @@ The chat window is modal (vim-style). It opens in **Normal** mode.
 | `:` | Enter Command mode |
 | `r` | Reply to selected message (enters Insert mode) |
 | `e` | Edit selected own message (enters Insert mode) |
-| `d` | Delete selected own message for everyone |
+| `dd` | Delete selected own message for everyone |
 | Esc | Deselect message |
 | `q` / ← | Return to Chat List |
 

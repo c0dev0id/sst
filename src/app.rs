@@ -45,6 +45,7 @@ pub struct ChatState {
     pub reply_to: Option<usize>,           // message index set by 'r' in Normal mode
     pub editing: Option<(usize, u64)>,     // (message index, timestamp) set by 'e' in Normal mode
     pub mention_names: Vec<String>,        // resolved names for @mention completion
+    pub pending_d: bool,                   // true after first 'd'; second 'd' triggers delete
 }
 
 pub enum AppCmd {
@@ -116,6 +117,7 @@ impl App {
             reply_to: None,
             editing: None,
             mention_names,
+            pending_d: false,
         });
         self.view = View::ChatWindow;
     }
@@ -199,6 +201,10 @@ impl App {
         if key.code != KeyCode::Tab {
             chat.autocomplete_hint = None;
         }
+        // Any key other than 'd' in Normal mode cancels a pending 'dd'.
+        if chat.pending_d && !(matches!(chat.mode, Mode::Normal) && key.code == KeyCode::Char('d')) {
+            chat.pending_d = false;
+        }
 
         // Snapshot mode discriminant to avoid holding a borrow into chat.mode across mutations.
         let mode_disc = match &chat.mode {
@@ -256,11 +262,15 @@ impl App {
                         }
                     }
                     KeyCode::Char('d') => {
-                        if chat.selected_message.is_some() {
-                            return Some(AppCmd::DeleteMessage);
-                        } else {
+                        if chat.selected_message.is_none() {
                             chat.autocomplete_hint =
                                 Some("select a message first (j/k)".to_string());
+                        } else if chat.pending_d {
+                            chat.pending_d = false;
+                            return Some(AppCmd::DeleteMessage);
+                        } else {
+                            chat.pending_d = true;
+                            chat.autocomplete_hint = Some("d again to delete for everyone".to_string());
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
