@@ -454,39 +454,56 @@ pub async fn lookup_contact_name<S: Store>(
     }
 }
 
-/// Returns display names for @mention completion in the given thread.
-/// For groups: all members except the account owner, resolved to contact names.
-/// For 1:1: the single contact's name.
-pub async fn load_mention_names<S: Store>(
-    manager: &Manager<S, Registered>,
+/// Resolves display names for all participants in a thread (excluding self).
+/// Returns a UUID → name map used for sender labels and @mention completion.
+/// For group members not in the contact store, attempts a profile fetch using
+/// the profile key stored in the group roster.
+pub async fn load_sender_names<S: Store>(
+    manager: &mut Manager<S, Registered>,
     thread: &Thread,
     own_aci: Option<Uuid>,
-) -> Vec<String> {
+) -> HashMap<Uuid, String> {
+    let mut map: HashMap<Uuid, String> = HashMap::new();
     match thread {
         Thread::Group(key) => {
             let Ok(Some(group)) = manager.store().group(*key).await else {
-                return Vec::new();
+                return map;
             };
-            let mut names = Vec::new();
-            for member in &group.members {
+            for member in group.members {
                 let uuid = presage::libsignal_service::protocol::ServiceId::Aci(member.aci)
                     .raw_uuid();
                 if own_aci == Some(uuid) {
                     continue;
                 }
-                names.push(lookup_contact_name(manager, uuid).await);
+                let name = lookup_contact_name(manager, uuid).await;
+                if name != uuid.to_string() {
+                    map.insert(uuid, name);
+                    continue;
+                }
+                // Not in contact store — try profile fetch using the roster key.
+                match manager.retrieve_profile_by_uuid(uuid, member.profile_key).await {
+                    Ok(profile) => {
+                        let resolved = profile.name
+                            .map(|n| n.to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| uuid.to_string());
+                        map.insert(uuid, resolved);
+                    }
+                    Err(e) => {
+                        tracing::warn!("profile fetch failed for {uuid}: {e}");
+                        map.insert(uuid, uuid.to_string());
+                    }
+                }
             }
-            names.sort();
-            names
         }
         Thread::Contact(service_id) => {
             let uuid = service_id.raw_uuid();
-            if own_aci == Some(uuid) {
-                return Vec::new();
+            if own_aci != Some(uuid) {
+                map.insert(uuid, lookup_contact_name(manager, uuid).await);
             }
-            vec![lookup_contact_name(manager, uuid).await]
         }
     }
+    map
 }
 
 pub async fn load_messages<S: Store>(

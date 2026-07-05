@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
+
 ### Added
 - Bracketed paste mode: pasting multi-line content into the input bar inserts it as a single text block rather than firing individual key events; eliminates accidental sends on multi-line paste
 

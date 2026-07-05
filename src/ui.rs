@@ -203,7 +203,9 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         let sender_label = if is_own {
             "You".to_string()
         } else if is_group {
-            sender_uuid.to_string()
+            chat.sender_names.get(&sender_uuid)
+                .cloned()
+                .unwrap_or_else(|| sender_uuid.to_string())
         } else {
             thread_name.clone()
         };
