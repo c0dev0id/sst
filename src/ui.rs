@@ -490,7 +490,7 @@ fn chat_status_bar(app: &App) -> String {
         }
         Mode::Insert => {
             if chat.editing.is_some() {
-                return "  -- INSERT -- editing   Esc cancel   Enter send   Shift+Enter newline".to_string();
+                return "  -- INSERT -- editing   Esc cancel   Enter send   Alt+Enter newline".to_string();
             }
             if let Some(reply_idx) = chat.reply_to {
                 if let Some(content) = chat.messages.get(reply_idx) {
@@ -503,7 +503,7 @@ fn chat_status_bar(app: &App) -> String {
                     );
                 }
             }
-            "  -- INSERT --   Esc normal   Enter send   Shift+Enter newline   Tab @mention".to_string()
+            "  -- INSERT --   Esc normal   Enter send   Alt+Enter newline   Tab @mention".to_string()
         }
         Mode::Command(_) => {
             "  -- COMMAND --   Enter execute   Esc cancel".to_string()

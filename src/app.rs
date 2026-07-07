@@ -138,8 +138,10 @@ impl App {
     pub fn on_paste(&mut self, text: String) {
         let Some(chat) = self.chat.as_mut() else { return };
         if !matches!(chat.mode, Mode::Insert) { return }
-        chat.input.insert_str(chat.cursor, &text);
-        chat.cursor += text.len();
+        // Normalize line endings: terminals may send \r\n (Windows) or bare \r.
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        chat.input.insert_str(chat.cursor, &normalized);
+        chat.cursor += normalized.len();
     }
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
@@ -334,7 +336,11 @@ impl App {
                         let h = chat.viewport_height as usize;
                         chat.scroll = chat.scroll.saturating_sub(h);
                     }
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    // Shift+Enter or Alt+Enter → newline.
+                    // Shift+Enter is only distinguishable from Enter on terminals that
+                    // support modifyOtherKeys/kitty-protocol. Alt+Enter (ESC \r) is more
+                    // universally reported with ALT modifier and is the reliable alternative.
+                    KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
                         chat.input.insert(chat.cursor, '\n');
                         chat.cursor += 1;
                     }
