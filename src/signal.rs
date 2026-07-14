@@ -846,9 +846,35 @@ async fn dispatch_send<S: Store>(
 async fn dispatch_send_body<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
-    body: ContentBody,
+    mut body: ContentBody,
     ts: u64,
 ) -> anyhow::Result<()> {
+    // Signal requires GroupContextV2 in every DataMessage sent to a group.
+    // Without it, recipients treat each delivery as an individual DM from the sender.
+    // presage's send_message_to_group does NOT inject this — it's our responsibility.
+    if let Thread::Group(master_key) = thread {
+        let revision = manager.store().group(*master_key).await
+            .ok()
+            .flatten()
+            .map(|g| g.revision)
+            .unwrap_or(0);
+        let ctx = GroupContextV2 {
+            master_key: Some(master_key.to_vec()),
+            revision: Some(revision),
+            group_change: None,
+        };
+        match &mut body {
+            ContentBody::DataMessage(dm) => {
+                dm.group_v2 = Some(ctx);
+            }
+            ContentBody::EditMessage(edit) => {
+                if let Some(dm) = &mut edit.data_message {
+                    dm.group_v2 = Some(ctx);
+                }
+            }
+            _ => {}
+        }
+    }
     match thread {
         Thread::Contact(service_id) => {
             manager

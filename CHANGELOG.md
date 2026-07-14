@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - Replace Shift+Enter (unreliable on most terminals) with Alt+Enter for newline insertion; both modifiers are now accepted so terminals that do report Shift+Enter continue to work
 - Paste: normalize \r\n and bare \r line endings to \n so multi-line pastes from Windows clipboards or certain terminals display and send correctly
+- Group messages now include GroupContextV2 in the DataMessage; previously the field was omitted, causing Signal to deliver each group message as an individual DM to every member instead of routing it through the group
 
 ### Added
 - Vim-style modal navigation in the chat window: Normal mode (default on open), Insert mode (`i`), Command mode (`:`). Normal mode uses `j`/`k` to select messages, `r` to reply, `e` to edit own messages, `d` to delete, `:` for colon commands, `q`/`←` to return to chat list.
