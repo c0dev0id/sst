@@ -141,11 +141,20 @@ impl App {
 
     pub fn on_paste(&mut self, text: String) {
         let Some(chat) = self.chat.as_mut() else { return };
-        if !matches!(chat.mode, Mode::Insert) { return }
-        // Normalize line endings: terminals may send \r\n (Windows) or bare \r.
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        chat.input.insert_str(chat.cursor, &normalized);
-        chat.cursor += normalized.len();
+        match &mut chat.mode {
+            Mode::Insert => {
+                // Normalize line endings: terminals may send \r\n (Windows) or bare \r.
+                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                chat.input.insert_str(chat.cursor, &normalized);
+                chat.cursor += normalized.len();
+            }
+            Mode::Command(s) => {
+                // Command line is single-line; collapse newlines to spaces.
+                let single = text.replace("\r\n", " ").replace('\r', " ").replace('\n', " ");
+                s.push_str(single.trim_end());
+            }
+            Mode::Normal => {}
+        }
     }
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
@@ -449,7 +458,30 @@ impl App {
                         }
                     }
                     KeyCode::Tab => {
-                        if !cmd_so_far.contains(' ') {
+                        if let Some(partial) = cmd_so_far.strip_prefix("upload ") {
+                            let partial = partial.trim_start();
+                            let completions = complete_path(partial);
+                            match completions.len() {
+                                0 => {}
+                                1 => {
+                                    chat.mode = Mode::Command(format!("upload {}", completions[0]));
+                                    chat.autocomplete_hint = None;
+                                }
+                                _ => {
+                                    let labels: Vec<String> = completions.iter()
+                                        .map(|c| {
+                                            // Show only the last path component in the hint.
+                                            let p = std::path::Path::new(c.trim_end_matches('/'));
+                                            let name = p.file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or(c);
+                                            if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
+                                        })
+                                        .collect();
+                                    chat.autocomplete_hint = Some(labels.join("  "));
+                                }
+                            }
+                        } else if !cmd_so_far.contains(' ') {
                             let partial = cmd_so_far.to_lowercase();
                             let matches: Vec<&str> = COLON_COMMANDS
                                 .iter()
@@ -647,6 +679,39 @@ fn completion_candidates(
     }
 
     None
+}
+
+// ── Path completion ───────────────────────────────────────────────────────────
+
+fn complete_path(partial: &str) -> Vec<String> {
+    let path = std::path::Path::new(partial);
+    let (dir, file_prefix, dir_prefix) = if partial.ends_with('/') {
+        (path, "", partial.to_string())
+    } else {
+        let parent = path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let prefix = path.file_name().and_then(|n| n.to_str()).unwrap_or(partial);
+        let dir_prefix = if let Some(p) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            format!("{}/", p.to_str().unwrap_or(""))
+        } else {
+            String::new()
+        };
+        (parent, prefix, dir_prefix)
+    };
+
+    let Ok(read_dir) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut results: Vec<String> = read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let fname = entry.file_name().into_string().ok()?;
+            if !fname.starts_with(file_prefix) { return None; }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            Some(format!("{}{}{}", dir_prefix, fname, if is_dir { "/" } else { "" }))
+        })
+        .collect();
+    results.sort();
+    results
 }
 
 // ── Cursor movement helpers ───────────────────────────────────────────────────
