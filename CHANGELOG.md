@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - File attachments: `:upload <path>` stages a file (validates immediately via metadata); multiple `:upload` calls accumulate in the attachment bar shown below the status bar. All staged attachments are uploaded and included when the next message is sent or replied. If a file becomes unavailable at send time, only that file is removed and the send is aborted; the user can re-add it and retry
+- Path Tab-completion in `:upload`: Tab after a partial path completes to the unique match or lists candidates; directories get a trailing `/` so Tab can chain through multiple levels without retyping
+- Paste now works in Command mode: newlines are collapsed to spaces, so a full path can be pasted directly into `:upload <paste>`
 - Attachment bar navigation: `j`/`k` in Normal mode cycle through messages and the attachment bar as a continuous ring (last message → first attachment → … → last attachment → first message, symmetric on `k`); `dd` on a selected attachment removes it with the usual two-press confirmation
 - Bracketed paste mode: pasting multi-line content into the input bar inserts it as a single text block rather than firing individual key events; eliminates accidental sends on multi-line paste
 - Input bar word-wrap: typed text now wraps at word boundaries to fit the terminal width, and reflows automatically on terminal resize; the block cursor tracks the correct visual position across wrapped sub-lines
