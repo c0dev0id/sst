@@ -688,15 +688,12 @@ fn complete_path(partial: &str) -> Vec<String> {
     let (dir, file_prefix, dir_prefix) = if partial.ends_with('/') {
         (path, "", partial.to_string())
     } else {
-        let parent = path.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(std::path::Path::new("."));
+        let parent_opt = path.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent = parent_opt.unwrap_or(std::path::Path::new("."));
         let prefix = path.file_name().and_then(|n| n.to_str()).unwrap_or(partial);
-        let dir_prefix = if let Some(p) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            format!("{}/", p.to_str().unwrap_or(""))
-        } else {
-            String::new()
-        };
+        let dir_prefix = parent_opt
+            .map(|p| format!("{}/", p.to_str().unwrap_or("")))
+            .unwrap_or_default();
         (parent, prefix, dir_prefix)
     };
 
@@ -848,7 +845,7 @@ async fn execute_cmd<S: Store>(
             app.view = View::ChatList;
         }
         AppCmd::SendMessage => {
-            let (text, thread, reply_info, editing) = {
+            let (text, thread, reply_info, editing, staged) = {
                 let chat = app.chat.as_mut().expect("SendMessage with no open chat");
                 chat.cursor = 0;
                 let reply_info = chat.reply_to.and_then(|idx| {
@@ -861,25 +858,26 @@ async fn execute_cmd<S: Store>(
                 });
                 let editing = chat.editing.take();
                 chat.reply_to = None;
-                (std::mem::take(&mut chat.input), chat.thread.clone(), reply_info, editing)
+                // Take staged attachments out now; on upload failure restore them below.
+                let staged = if editing.is_none() {
+                    std::mem::take(&mut chat.staged_attachments)
+                } else {
+                    Vec::new()
+                };
+                (std::mem::take(&mut chat.input), chat.thread.clone(), reply_info, editing, staged)
             };
 
-            // Upload staged attachments (not for edits — you're changing body, not adding files).
-            let staged_snapshot: Vec<_> = app.chat.as_ref()
-                .map(|c| c.staged_attachments.clone())
-                .unwrap_or_default();
-            let pointers = if editing.is_none() && !staged_snapshot.is_empty() {
-                match signal::upload_staged_attachments(manager, &staged_snapshot).await {
+            let pointers = if !staged.is_empty() {
+                match signal::upload_staged_attachments(manager, &staged).await {
                     Ok(pts) => {
                         if let Some(c) = &mut app.chat {
-                            c.staged_attachments.clear();
                             c.selected_attachment = None;
                         }
                         pts
                     }
                     Err((msg, failed_path)) => {
                         if let Some(c) = &mut app.chat {
-                            c.staged_attachments.retain(|a| a.path != failed_path);
+                            c.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
                             if let Some(sel) = c.selected_attachment {
                                 let len = c.staged_attachments.len();
                                 c.selected_attachment = if len == 0 { None } else { Some(sel.min(len - 1)) };

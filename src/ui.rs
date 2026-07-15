@@ -180,7 +180,7 @@ fn draw_attachment_bar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("  Att:", Style::default().fg(Color::DarkGray)),
     ];
     for (i, att) in chat.staged_attachments.iter().enumerate() {
-        let label = format!(" [{}  {}]", att.kind, signal::fmt_attachment_size(att.size));
+        let label = format!(" [{}  {}]", signal::kind_from_mime(att.mime), signal::fmt_attachment_size(att.size));
         let style = if chat.selected_attachment == Some(i) {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -507,7 +507,7 @@ fn chat_status_bar(app: &App) -> String {
                     let pos = format!("{}/{}", att_idx + 1, chat.staged_attachments.len());
                     return format!(
                         "  Att [{}]  {}  {}  |  dd remove   Esc deselect   q back",
-                        pos, att.kind, signal::fmt_attachment_size(att.size)
+                        pos, signal::kind_from_mime(att.mime), signal::fmt_attachment_size(att.size)
                     );
                 }
             }

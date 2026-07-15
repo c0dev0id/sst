@@ -49,7 +49,6 @@ pub struct SyncState {
 #[derive(Clone)]
 pub struct StagedAttachment {
     pub path: PathBuf,
-    pub kind: &'static str, // "gif" | "image" | "video" | "audio" | "file"
     pub mime: &'static str,
     pub size: u64,
 }
@@ -60,11 +59,9 @@ pub fn stage_attachment(path: &Path) -> Result<StagedAttachment, String> {
     if !meta.is_file() {
         return Err(format!("{}: not a file", path.display()));
     }
-    let mime = mime_from_path(path);
     Ok(StagedAttachment {
         path: path.to_path_buf(),
-        kind: kind_from_mime(mime),
-        mime,
+        mime: mime_from_path(path),
         size: meta.len(),
     })
 }
@@ -101,7 +98,7 @@ fn mime_from_path(path: &Path) -> &'static str {
     }
 }
 
-fn kind_from_mime(mime: &str) -> &'static str {
+pub(crate) fn kind_from_mime(mime: &str) -> &'static str {
     if mime == "image/gif" { "gif" }
     else if mime.starts_with("image/") { "image" }
     else if mime.starts_with("video/") { "video" }
@@ -120,6 +117,8 @@ pub fn fmt_attachment_size(bytes: u64) -> String {
         format!("{:.1} GB", bytes as f64 / (1_024.0 * 1_024.0 * 1_024.0))
     }
 }
+
+const ATTACHMENT_FLAG_GIF: u32 = 8;
 
 /// Upload staged attachments one by one; on any failure returns an error with
 /// a human-readable message and the path of the file that failed, so the caller
@@ -145,8 +144,7 @@ pub async fn upload_staged_attachments<S: Store>(
             Err(e)     => return Err((format!("upload error: {e}"), att.path.clone())),
         };
         if is_gif {
-            // GIF = 8 per Signal proto's AttachmentPointer.Flags enum; not settable via AttachmentSpec.
-            pointer.flags = Some(pointer.flags.unwrap_or(0) | 8);
+            pointer.flags = Some(pointer.flags.unwrap_or(0) | ATTACHMENT_FLAG_GIF);
         }
         pointers.push(pointer);
     }
