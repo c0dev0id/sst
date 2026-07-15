@@ -143,6 +143,11 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
     } else {
         2
     };
+    let att_height = if app.chat.as_ref().map(|c| !c.staged_attachments.is_empty()).unwrap_or(false) {
+        1u16
+    } else {
+        0u16
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -150,6 +155,7 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(att_height),
             Constraint::Length(input_height),
         ])
         .split(f.area());
@@ -159,7 +165,30 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
 
     let status = chat_status_bar(app);
     draw_status_bar(f, chunks[2], &status);
-    draw_input(f, app, chunks[3]);
+    if att_height > 0 {
+        draw_attachment_bar(f, app, chunks[3]);
+    }
+    draw_input(f, app, chunks[4]);
+}
+
+fn draw_attachment_bar(f: &mut Frame, app: &App, area: Rect) {
+    let chat = match app.chat.as_ref() {
+        Some(c) => c,
+        None => return,
+    };
+    let mut spans: Vec<Span> = vec![
+        Span::styled("  Att:", Style::default().fg(Color::DarkGray)),
+    ];
+    for (i, att) in chat.staged_attachments.iter().enumerate() {
+        let label = format!(" [{}  {}]", att.kind, signal::fmt_attachment_size(att.size));
+        let style = if chat.selected_attachment == Some(i) {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(label, style));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_chat_header(f: &mut Frame, app: &App, area: Rect) {
@@ -473,6 +502,15 @@ fn chat_status_bar(app: &App) -> String {
 
     match &chat.mode {
         Mode::Normal => {
+            if let Some(att_idx) = chat.selected_attachment {
+                if let Some(att) = chat.staged_attachments.get(att_idx) {
+                    let pos = format!("{}/{}", att_idx + 1, chat.staged_attachments.len());
+                    return format!(
+                        "  Att [{}]  {}  {}  |  dd remove   Esc deselect   q back",
+                        pos, att.kind, signal::fmt_attachment_size(att.size)
+                    );
+                }
+            }
             if let Some(sel_idx) = chat.selected_message {
                 if let Some(content) = chat.messages.get(sel_idx) {
                     let sender_uuid = content.metadata.sender.raw_uuid();
@@ -486,7 +524,7 @@ fn chat_status_bar(app: &App) -> String {
                     );
                 }
             }
-            "  j/k/↑↓ navigate   r reply   e edit   dd delete   : command   PgUp/PgDn scroll   h/q/← back".to_string()
+            "  j/k/↑↓ navigate   r reply   e edit   dd delete   : command   :upload <path>   PgUp/PgDn scroll   h/q/← back".to_string()
         }
         Mode::Insert => {
             if chat.editing.is_some() {

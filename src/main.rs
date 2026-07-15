@@ -206,7 +206,7 @@ async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Optio
         if text.is_empty() {
             anyhow::bail!("nothing to send (stdin was empty)");
         }
-        signal::send_to_thread(&mut manager, &thread, text).await?;
+        signal::send_to_thread(&mut manager, &thread, text, Vec::new()).await?;
         return Ok(());
     }
 

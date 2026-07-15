@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
-use crate::signal::{self, ReactionMap, ThreadEntry};
+use crate::signal::{self, ReactionMap, StagedAttachment, ThreadEntry};
 
 pub enum View {
     ChatList,
@@ -47,6 +47,8 @@ pub struct ChatState {
     pub editing: Option<(usize, u64)>,     // (message index, timestamp) set by 'e' in Normal mode
     pub sender_names: HashMap<Uuid, String>, // resolved names for sender display and @mention
     pub pending_d: bool,                   // true after first 'd'; second 'd' triggers delete
+    pub staged_attachments: Vec<StagedAttachment>,
+    pub selected_attachment: Option<usize>, // mutually exclusive with selected_message
 }
 
 pub enum AppCmd {
@@ -120,6 +122,8 @@ impl App {
             editing: None,
             sender_names,
             pending_d: false,
+            staged_attachments: Vec::new(),
+            selected_attachment: None,
         });
         self.view = View::ChatWindow;
     }
@@ -227,8 +231,9 @@ impl App {
             0 => { // Normal mode
                 match key.code {
                     KeyCode::Esc => {
-                        if chat.selected_message.is_some() {
+                        if chat.selected_message.is_some() || chat.selected_attachment.is_some() {
                             chat.selected_message = None;
+                            chat.selected_attachment = None;
                             chat.reply_to = None;
                             chat.editing = None;
                         }
@@ -272,9 +277,22 @@ impl App {
                         }
                     }
                     KeyCode::Char('d') => {
-                        if chat.selected_message.is_none() {
-                            chat.autocomplete_hint =
-                                Some(HINT_SELECT_FIRST.to_string());
+                        if let Some(att_idx) = chat.selected_attachment {
+                            if chat.pending_d {
+                                chat.pending_d = false;
+                                chat.staged_attachments.remove(att_idx);
+                                let new_len = chat.staged_attachments.len();
+                                chat.selected_attachment = if new_len == 0 {
+                                    None
+                                } else {
+                                    Some(att_idx.min(new_len - 1))
+                                };
+                            } else {
+                                chat.pending_d = true;
+                                chat.autocomplete_hint = Some("d again to remove attachment".to_string());
+                            }
+                        } else if chat.selected_message.is_none() {
+                            chat.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
                         } else if chat.pending_d {
                             chat.pending_d = false;
                             return Some(AppCmd::DeleteMessage);
@@ -285,19 +303,46 @@ impl App {
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         if !chat.messages.is_empty() {
-                            chat.selected_message = Some(
-                                chat.selected_message
-                                    .map(|s| s.saturating_sub(1))
-                                    .unwrap_or(chat.messages.len() - 1),
-                            );
+                            if let Some(i) = chat.selected_attachment {
+                                if i == 0 {
+                                    chat.selected_attachment = None;
+                                    chat.selected_message = Some(chat.messages.len() - 1);
+                                } else {
+                                    chat.selected_attachment = Some(i - 1);
+                                }
+                            } else if let Some(s) = chat.selected_message {
+                                if s == 0 && !chat.staged_attachments.is_empty() {
+                                    chat.selected_message = None;
+                                    chat.selected_attachment = Some(chat.staged_attachments.len() - 1);
+                                } else {
+                                    chat.selected_message = Some(s.saturating_sub(1));
+                                }
+                            } else {
+                                chat.selected_message = Some(chat.messages.len() - 1);
+                            }
                         }
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
                         if !chat.messages.is_empty() {
-                            chat.selected_message = Some(match chat.selected_message {
-                                Some(sel) => (sel + 1).min(chat.messages.len() - 1),
-                                None => chat.viewport_top_msg,
-                            });
+                            if let Some(i) = chat.selected_attachment {
+                                let last = chat.staged_attachments.len().saturating_sub(1);
+                                if i >= last {
+                                    chat.selected_attachment = None;
+                                    chat.selected_message = Some(0);
+                                } else {
+                                    chat.selected_attachment = Some(i + 1);
+                                }
+                            } else if let Some(sel) = chat.selected_message {
+                                let last_msg = chat.messages.len() - 1;
+                                if sel >= last_msg && !chat.staged_attachments.is_empty() {
+                                    chat.selected_message = None;
+                                    chat.selected_attachment = Some(0);
+                                } else {
+                                    chat.selected_message = Some((sel + 1).min(last_msg));
+                                }
+                            } else {
+                                chat.selected_message = Some(chat.viewport_top_msg);
+                            }
                         }
                     }
                     KeyCode::PageUp => {
@@ -345,7 +390,7 @@ impl App {
                         chat.cursor += 1;
                     }
                     KeyCode::Enter => {
-                        if !chat.input.trim().is_empty() {
+                        if !chat.input.trim().is_empty() || !chat.staged_attachments.is_empty() {
                             return Some(AppCmd::SendMessage);
                         }
                     }
@@ -528,12 +573,13 @@ impl App {
 
 // ── Colon command registry ────────────────────────────────────────────────────
 
-const COLON_COMMANDS: &[&str] = &["quit", "react"];
+const COLON_COMMANDS: &[&str] = &["quit", "react", "upload"];
 const HINT_SELECT_FIRST: &str = "select a message first (j/k)";
 
 enum ColonCmd<'a> {
     Quit,
-    React(&'a str), // emoji/shortcode arg; empty string means "show reactions"
+    React(&'a str),  // emoji/shortcode arg; empty string means "show reactions"
+    Upload(&'a str), // file path
 }
 
 fn parse_colon_cmd(input: &str) -> Option<ColonCmd<'_>> {
@@ -543,9 +589,10 @@ fn parse_colon_cmd(input: &str) -> Option<ColonCmd<'_>> {
         .map(|(n, a)| (n, a.trim()))
         .unwrap_or((s, ""));
     match name {
-        "quit"  => Some(ColonCmd::Quit),
-        "react" => Some(ColonCmd::React(arg)),
-        _       => None,
+        "quit"   => Some(ColonCmd::Quit),
+        "react"  => Some(ColonCmd::React(arg)),
+        "upload" => Some(ColonCmd::Upload(arg)),
+        _        => None,
     }
 }
 
@@ -752,16 +799,45 @@ async fn execute_cmd<S: Store>(
                 (std::mem::take(&mut chat.input), chat.thread.clone(), reply_info, editing)
             };
 
+            // Upload staged attachments (not for edits — you're changing body, not adding files).
+            let staged_snapshot: Vec<_> = app.chat.as_ref()
+                .map(|c| c.staged_attachments.clone())
+                .unwrap_or_default();
+            let pointers = if editing.is_none() && !staged_snapshot.is_empty() {
+                match signal::upload_staged_attachments(manager, &staged_snapshot).await {
+                    Ok(pts) => {
+                        if let Some(c) = &mut app.chat {
+                            c.staged_attachments.clear();
+                            c.selected_attachment = None;
+                        }
+                        pts
+                    }
+                    Err((msg, failed_path)) => {
+                        if let Some(c) = &mut app.chat {
+                            c.staged_attachments.retain(|a| a.path != failed_path);
+                            if let Some(sel) = c.selected_attachment {
+                                let len = c.staged_attachments.len();
+                                c.selected_attachment = if len == 0 { None } else { Some(sel.min(len - 1)) };
+                            }
+                            c.autocomplete_hint = Some(msg);
+                        }
+                        return Ok(());
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
             let trimmed = text.trim();
-            if !trimmed.is_empty() {
+            if !trimmed.is_empty() || !pointers.is_empty() {
                 if let Some((_idx, edit_ts)) = editing {
                     signal::send_edit(manager, &thread, edit_ts, trimmed.to_string()).await?;
                     if let Some(c) = &mut app.chat { c.selected_message = None; }
                 } else if let Some((q_ts, q_author, q_text)) = reply_info {
-                    signal::send_reply(manager, &thread, trimmed.to_string(), q_ts, q_author, q_text).await?;
+                    signal::send_reply(manager, &thread, trimmed.to_string(), q_ts, q_author, q_text, pointers).await?;
                     if let Some(c) = &mut app.chat { c.selected_message = None; }
                 } else {
-                    signal::send_to_thread(manager, &thread, trimmed.to_string()).await?;
+                    signal::send_to_thread(manager, &thread, trimmed.to_string(), pointers).await?;
                 }
                 reload_chat(manager, &thread, &mut app.chat).await;
             }
@@ -816,6 +892,26 @@ async fn execute_cmd<S: Store>(
                         }
                     } else if let Some(chat) = &mut app.chat {
                         chat.autocomplete_hint = Some("no message selected".to_string());
+                    }
+                }
+                Some(ColonCmd::Upload(path)) => {
+                    if path.is_empty() {
+                        if let Some(chat) = &mut app.chat {
+                            chat.autocomplete_hint = Some(":upload <path>".to_string());
+                        }
+                    } else {
+                        match signal::stage_attachment(std::path::Path::new(path)) {
+                            Ok(att) => {
+                                if let Some(chat) = &mut app.chat {
+                                    chat.staged_attachments.push(att);
+                                }
+                            }
+                            Err(msg) => {
+                                if let Some(chat) = &mut app.chat {
+                                    chat.autocomplete_hint = Some(msg);
+                                }
+                            }
+                        }
                     }
                 }
                 None => {

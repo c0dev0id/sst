@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use anyhow::Context as _;
@@ -10,7 +10,8 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
-use presage::libsignal_service::proto::{DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
+use presage::libsignal_service::proto::{AttachmentPointer, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
+use presage::libsignal_service::sender::AttachmentSpec;
 
 /// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
 /// Apply in chronological order to handle add/remove toggles correctly.
@@ -43,6 +44,113 @@ pub struct MessageUpdate {
 pub struct SyncState {
     pub data_dir: std::path::PathBuf,
     pub own_aci: Option<Uuid>,
+}
+
+#[derive(Clone)]
+pub struct StagedAttachment {
+    pub path: PathBuf,
+    pub kind: &'static str, // "gif" | "image" | "video" | "audio" | "file"
+    pub mime: &'static str,
+    pub size: u64,
+}
+
+pub fn stage_attachment(path: &Path) -> Result<StagedAttachment, String> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("{}: {}", path.display(), e))?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a file", path.display()));
+    }
+    let mime = mime_from_path(path);
+    Ok(StagedAttachment {
+        path: path.to_path_buf(),
+        kind: kind_from_mime(mime),
+        mime,
+        size: meta.len(),
+    })
+}
+
+fn mime_from_path(path: &Path) -> &'static str {
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png"  => "image/png",
+        "gif"  => "image/gif",
+        "webp" => "image/webp",
+        "heic" | "heif" => "image/heic",
+        "mp4"  => "video/mp4",
+        "mov"  => "video/quicktime",
+        "avi"  => "video/x-msvideo",
+        "webm" => "video/webm",
+        "mkv"  => "video/x-matroska",
+        "mp3"  => "audio/mpeg",
+        "m4a"  => "audio/mp4",
+        "ogg"  => "audio/ogg",
+        "opus" => "audio/opus",
+        "aac"  => "audio/aac",
+        "flac" => "audio/flac",
+        "wav"  => "audio/wav",
+        "pdf"  => "application/pdf",
+        "zip"  => "application/zip",
+        "tar"  => "application/x-tar",
+        "gz"   => "application/gzip",
+        "bz2"  => "application/x-bzip2",
+        _      => "application/octet-stream",
+    }
+}
+
+fn kind_from_mime(mime: &str) -> &'static str {
+    if mime == "image/gif" { "gif" }
+    else if mime.starts_with("image/") { "image" }
+    else if mime.starts_with("video/") { "video" }
+    else if mime.starts_with("audio/") { "audio" }
+    else { "file" }
+}
+
+pub fn fmt_attachment_size(bytes: u64) -> String {
+    if bytes < 1_024 {
+        format!("{} B", bytes)
+    } else if bytes < 1_024 * 1_024 {
+        format!("{:.0} KB", bytes as f64 / 1_024.0)
+    } else if bytes < 1_024 * 1_024 * 1_024 {
+        format!("{:.1} MB", bytes as f64 / (1_024.0 * 1_024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1_024.0 * 1_024.0 * 1_024.0))
+    }
+}
+
+/// Upload staged attachments one by one; on any failure returns an error with
+/// a human-readable message and the path of the file that failed, so the caller
+/// can remove just that entry and let the user retry.
+pub async fn upload_staged_attachments<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    staged: &[StagedAttachment],
+) -> Result<Vec<AttachmentPointer>, (String, PathBuf)> {
+    let mut pointers = Vec::with_capacity(staged.len());
+    for att in staged {
+        let bytes = std::fs::read(&att.path)
+            .map_err(|e| (format!("{}: {}", att.path.display(), e), att.path.clone()))?;
+        let is_gif = att.mime == "image/gif";
+        let spec = AttachmentSpec {
+            content_type: att.mime.to_string(),
+            length: bytes.len(),
+            file_name: att.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let mut pointer = match manager.upload_attachment(spec, bytes).await {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => return Err((format!("upload failed: {e}"), att.path.clone())),
+            Err(e)     => return Err((format!("upload error: {e}"), att.path.clone())),
+        };
+        if is_gif {
+            // GIF = 8 per Signal proto's AttachmentPointer.Flags enum; not settable via AttachmentSpec.
+            pointer.flags = Some(pointer.flags.unwrap_or(0) | 8);
+        }
+        pointers.push(pointer);
+    }
+    Ok(pointers)
 }
 
 impl SyncState {
@@ -714,11 +822,13 @@ pub async fn send_to_thread<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     text: String,
+    attachments: Vec<AttachmentPointer>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
     let data_message = DataMessage {
-        body: Some(text),
+        body: if text.is_empty() { None } else { Some(text) },
         timestamp: Some(ts),
+        attachments,
         ..Default::default()
     };
     dispatch_send(manager, thread, data_message, ts).await
@@ -731,6 +841,7 @@ pub async fn send_reply<S: Store>(
     quote_ts: u64,
     quote_author: Uuid,
     quote_text: String,
+    attachments: Vec<AttachmentPointer>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
     let quote = data_message::Quote {
@@ -741,9 +852,10 @@ pub async fn send_reply<S: Store>(
         ..Default::default()
     };
     let data_message = DataMessage {
-        body: Some(text),
+        body: if text.is_empty() { None } else { Some(text) },
         timestamp: Some(ts),
         quote: Some(quote),
+        attachments,
         ..Default::default()
     };
     dispatch_send(manager, thread, data_message, ts).await
