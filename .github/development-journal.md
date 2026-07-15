@@ -77,6 +77,20 @@ The input cursor (`ChatState::cursor`) is stored as a byte offset into the UTF-8
 
 `str::lines()` in Rust does not yield a trailing empty element when the string ends with `\n`. Use `str::split('\n')` instead when preserving trailing newlines matters (e.g., rendering a multi-line input field after Shift+Enter).
 
+### Attachment upload pipeline
+
+Attachment handling is split into three phases to keep failures contained:
+
+1. **Staging** (`:upload <path>`): `std::fs::metadata` validates the file exists and is a regular file; MIME type is derived from the extension (no new crate); `StagedAttachment { path, kind, mime, size }` is pushed to `ChatState::staged_attachments`. Staged attachments survive mode changes and persist until the user leaves the chat.
+2. **Uploading** (at send time): `upload_staged_attachments` reads each file's bytes, calls `manager.upload_attachment(spec, bytes)`, and sets the GIF flag (`= 8`) manually post-upload because `AttachmentSpec` has no gif field. If any file fails (IO error, 413 over-size, etc.), only that file is removed from staging and the send is aborted — the user can re-add the file from a new path.
+3. **Sending**: `Vec<AttachmentPointer>` is included in the `DataMessage.attachments` field. `send_edit` intentionally does not forward attachments (you're changing body text, not re-attaching files).
+
+GIF flag value (8) is defined in `SignalService.proto` `AttachmentPointer.Flags` enum. It is NOT exposed via `AttachmentSpec` or set automatically by presage/libsignal-service-rs — confirmed in `sender.rs`.
+
+### Attachment bar / navigation ring
+
+`selected_message` and `selected_attachment` are mutually exclusive in `ChatState`. Navigation in Normal mode forms a circular ring: oldest message → … → newest message → first staged file → … → last staged file → oldest message (k is fully symmetric). This avoids two separate navigation contexts and lets the user move naturally from reviewing messages to checking/removing queued files.
+
 ## Core Features
 
 See `README.md` for the full UX specification. High-level:
