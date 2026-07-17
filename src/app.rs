@@ -481,6 +481,26 @@ impl App {
                                     chat.autocomplete_hint = Some(labels.join("  "));
                                 }
                             }
+                        } else if let Some(partial) = cmd_so_far.strip_prefix("react ") {
+                            let partial = partial.trim_start();
+                            if !partial.is_empty() && partial.is_ascii() {
+                                let partial_lower = partial.to_lowercase();
+                                let mut matches: Vec<&str> = emojis::iter()
+                                    .filter_map(|e| e.shortcode())
+                                    .filter(|s| s.starts_with(partial_lower.as_str()))
+                                    .collect();
+                                matches.sort_unstable();
+                                match matches.len() {
+                                    0 => {}
+                                    1 => {
+                                        chat.mode = Mode::Command(format!("react {}", matches[0]));
+                                        chat.autocomplete_hint = None;
+                                    }
+                                    _ => {
+                                        chat.autocomplete_hint = Some(matches.join("  "));
+                                    }
+                                }
+                            }
                         } else if !cmd_so_far.contains(' ') {
                             let partial = cmd_so_far.to_lowercase();
                             let matches: Vec<&str> = COLON_COMMANDS
