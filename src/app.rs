@@ -486,7 +486,7 @@ impl App {
                             if !partial.is_empty() && partial.is_ascii() {
                                 let partial_lower = partial.to_lowercase();
                                 let mut matches: Vec<&str> = emojis::iter()
-                                    .filter_map(|e| e.shortcode())
+                                    .flat_map(|e| e.shortcodes())
                                     .filter(|s| s.starts_with(partial_lower.as_str()))
                                     .collect();
                                 matches.sort_unstable();
