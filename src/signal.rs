@@ -151,6 +151,78 @@ pub async fn upload_staged_attachments<S: Store>(
     Ok(pointers)
 }
 
+/// Extract attachment pointers from a message (both incoming and own-device sync sends).
+pub fn message_attachments(content: &Content) -> &[AttachmentPointer] {
+    match &content.body {
+        ContentBody::DataMessage(dm) => &dm.attachments,
+        ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(Sent { message: Some(dm), .. }),
+            ..
+        }) => &dm.attachments,
+        _ => &[],
+    }
+}
+
+/// Derive a filename for a downloaded attachment.
+/// Uses the pointer's fileName field when present; falls back to `attachment_N.<ext>`.
+pub fn attachment_filename(pointer: &AttachmentPointer, idx: usize) -> String {
+    if let Some(name) = &pointer.file_name {
+        if !name.is_empty() {
+            return name.clone();
+        }
+    }
+    let ext = pointer.content_type.as_deref()
+        .and_then(|ct| ct.split('/').nth(1))
+        .unwrap_or("bin");
+    format!("attachment_{}.{}", idx, ext)
+}
+
+/// Return a path in `dir` for `filename` that does not yet exist.
+/// Inserts `_N` before the extension on each collision.
+pub fn unique_path(dir: &Path, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let p = Path::new(filename);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
+    let ext  = p.extension().and_then(|e| e.to_str());
+    for n in 1u32.. {
+        let name = match ext {
+            Some(e) => format!("{}_{}.{}", stem, n, e),
+            None    => format!("{}_{}", stem, n),
+        };
+        let candidate = dir.join(&name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Download and decrypt one attachment, writing atomically via a `.tmp` sibling.
+/// If the process is killed mid-download nothing is written; if killed mid-write
+/// only an orphaned `.tmp` is left, never a partial real file.
+pub async fn download_attachment<S: Store>(
+    manager: &Manager<S, Registered>,
+    pointer: &AttachmentPointer,
+    dir: &Path,
+    filename: &str,
+) -> Result<PathBuf, String> {
+    let final_path = unique_path(dir, filename);
+    let mut tmp_name = final_path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+
+    let bytes = manager.get_attachment(pointer).await
+        .map_err(|e| format!("download failed: {e}"))?;
+    std::fs::write(&tmp_path, &bytes)
+        .map_err(|e| format!("{}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &final_path)
+        .map_err(|e| format!("rename failed: {e}"))?;
+    Ok(final_path)
+}
+
 impl SyncState {
     fn groups_path(&self) -> std::path::PathBuf {
         self.data_dir.join("known_groups")

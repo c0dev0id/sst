@@ -10,6 +10,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::Content;
 use presage::libsignal_service::prelude::Uuid;
+use presage::libsignal_service::proto::AttachmentPointer;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
@@ -481,6 +482,46 @@ impl App {
                                     chat.autocomplete_hint = Some(labels.join("  "));
                                 }
                             }
+                        } else if let Some(partial) = cmd_so_far.strip_prefix("download-all ") {
+                            let partial = partial.trim_start();
+                            let completions = complete_path(partial);
+                            match completions.len() {
+                                0 => {}
+                                1 => {
+                                    chat.mode = Mode::Command(format!("download-all {}", completions[0]));
+                                    chat.autocomplete_hint = None;
+                                }
+                                _ => {
+                                    let labels: Vec<String> = completions.iter()
+                                        .map(|c| {
+                                            let p = std::path::Path::new(c.trim_end_matches('/'));
+                                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(c);
+                                            if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
+                                        })
+                                        .collect();
+                                    chat.autocomplete_hint = Some(labels.join("  "));
+                                }
+                            }
+                        } else if let Some(partial) = cmd_so_far.strip_prefix("download ") {
+                            let partial = partial.trim_start();
+                            let completions = complete_path(partial);
+                            match completions.len() {
+                                0 => {}
+                                1 => {
+                                    chat.mode = Mode::Command(format!("download {}", completions[0]));
+                                    chat.autocomplete_hint = None;
+                                }
+                                _ => {
+                                    let labels: Vec<String> = completions.iter()
+                                        .map(|c| {
+                                            let p = std::path::Path::new(c.trim_end_matches('/'));
+                                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(c);
+                                            if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
+                                        })
+                                        .collect();
+                                    chat.autocomplete_hint = Some(labels.join("  "));
+                                }
+                            }
                         } else if let Some(partial) = cmd_so_far.strip_prefix("react ") {
                             let partial = partial.trim_start();
                             if !partial.is_empty() && partial.is_ascii() {
@@ -625,13 +666,15 @@ impl App {
 
 // ── Colon command registry ────────────────────────────────────────────────────
 
-const COLON_COMMANDS: &[&str] = &["quit", "react", "upload"];
+const COLON_COMMANDS: &[&str] = &["download", "download-all", "quit", "react", "upload"];
 const HINT_SELECT_FIRST: &str = "select a message first (j/k)";
 
 enum ColonCmd<'a> {
     Quit,
-    React(&'a str),  // emoji/shortcode arg; empty string means "show reactions"
-    Upload(&'a str), // file path
+    React(&'a str),       // emoji/shortcode arg; empty string means "show reactions"
+    Upload(&'a str),      // file path
+    Download(&'a str),    // optional destination dir; empty = default
+    DownloadAll(&'a str), // optional destination dir; empty = default
 }
 
 fn parse_colon_cmd(input: &str) -> Option<ColonCmd<'_>> {
@@ -641,10 +684,12 @@ fn parse_colon_cmd(input: &str) -> Option<ColonCmd<'_>> {
         .map(|(n, a)| (n, a.trim()))
         .unwrap_or((s, ""));
     match name {
-        "quit"   => Some(ColonCmd::Quit),
-        "react"  => Some(ColonCmd::React(arg)),
-        "upload" => Some(ColonCmd::Upload(arg)),
-        _        => None,
+        "quit"         => Some(ColonCmd::Quit),
+        "react"        => Some(ColonCmd::React(arg)),
+        "upload"       => Some(ColonCmd::Upload(arg)),
+        "download"     => Some(ColonCmd::Download(arg)),
+        "download-all" => Some(ColonCmd::DownloadAll(arg)),
+        _              => None,
     }
 }
 
@@ -815,10 +860,21 @@ async fn reload_chat<S: Store>(
     }
 }
 
+fn resolve_download_dir(path_arg: &str, thread_name: &str) -> anyhow::Result<PathBuf> {
+    if !path_arg.is_empty() {
+        return Ok(PathBuf::from(path_arg));
+    }
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("$HOME not set"))?;
+    let safe_name = thread_name.replace(['/', '\\', '\0'], "_");
+    Ok(PathBuf::from(home).join("Downloads").join("sst").join(safe_name))
+}
+
 async fn execute_cmd<S: Store>(
     app: &mut App,
     manager: &mut Manager<S, Registered>,
     cmd: AppCmd,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     match cmd {
         AppCmd::OpenChat { thread, name } => {
@@ -997,6 +1053,116 @@ async fn execute_cmd<S: Store>(
                         }
                     }
                 }
+                Some(ColonCmd::Download(path_arg)) => {
+                    let (thread_name, atts) = {
+                        let chat = match app.chat.as_ref() {
+                            Some(c) => c,
+                            None => return Ok(()),
+                        };
+                        let idx = match chat.selected_message {
+                            Some(i) => i,
+                            None => {
+                                if let Some(c) = &mut app.chat {
+                                    c.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
+                                }
+                                return Ok(());
+                            }
+                        };
+                        let atts = chat.messages.get(idx)
+                            .map(|m| signal::message_attachments(m).to_vec())
+                            .unwrap_or_default();
+                        (chat.thread_name.clone(), atts)
+                    };
+                    if atts.is_empty() {
+                        if let Some(c) = &mut app.chat {
+                            c.autocomplete_hint = Some("no attachments on selected message".to_string());
+                        }
+                        return Ok(());
+                    }
+                    let dir = resolve_download_dir(path_arg, &thread_name)?;
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
+                    let total = atts.len();
+                    for (i, pointer) in atts.iter().enumerate() {
+                        if total > 1 {
+                            if let Some(c) = &mut app.chat {
+                                c.autocomplete_hint = Some(format!("downloading {}/{}…", i + 1, total));
+                            }
+                            terminal.draw(|f| crate::ui::draw(f, app))?;
+                        }
+                        let filename = signal::attachment_filename(pointer, i);
+                        match signal::download_attachment(manager, pointer, &dir, &filename).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                if let Some(c) = &mut app.chat { c.autocomplete_hint = Some(e); }
+                                return Ok(());
+                            }
+                        }
+                    }
+                    if let Some(c) = &mut app.chat {
+                        c.autocomplete_hint = Some(format!("saved {} file(s) to {}", total, dir.display()));
+                    }
+                }
+                Some(ColonCmd::DownloadAll(path_arg)) => {
+                    let thread_name = match app.chat.as_ref() {
+                        Some(c) => c.thread_name.clone(),
+                        None => return Ok(()),
+                    };
+                    // Collect all (filename, pointer, msg_num) — msg_num counts only msgs with attachments.
+                    let mut downloads: Vec<(String, AttachmentPointer, usize)> = Vec::new();
+                    let mut msg_with_atts = 0usize;
+                    let mut global_idx = 0usize;
+                    if let Some(chat) = app.chat.as_ref() {
+                        for msg in &chat.messages {
+                            let atts = signal::message_attachments(msg);
+                            if atts.is_empty() { continue; }
+                            msg_with_atts += 1;
+                            for pointer in atts {
+                                downloads.push((
+                                    signal::attachment_filename(pointer, global_idx),
+                                    pointer.clone(),
+                                    msg_with_atts,
+                                ));
+                                global_idx += 1;
+                            }
+                        }
+                    }
+                    if downloads.is_empty() {
+                        if let Some(c) = &mut app.chat {
+                            c.autocomplete_hint = Some("no attachments in this chat".to_string());
+                        }
+                        return Ok(());
+                    }
+                    let total_files = downloads.len();
+                    let total_msgs = msg_with_atts;
+                    let dir = resolve_download_dir(path_arg, &thread_name)?;
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
+                    for (i, (filename, pointer, msg_num)) in downloads.iter().enumerate() {
+                        if let Some(c) = &mut app.chat {
+                            c.autocomplete_hint = Some(format!(
+                                "downloading {}/{} (message {}/{})…",
+                                i + 1, total_files, msg_num, total_msgs
+                            ));
+                        }
+                        terminal.draw(|f| crate::ui::draw(f, app))?;
+                        match signal::download_attachment(manager, pointer, &dir, filename).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                if let Some(c) = &mut app.chat {
+                                    c.autocomplete_hint = Some(format!("file {}: {}", i + 1, e));
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                    if let Some(c) = &mut app.chat {
+                        c.autocomplete_hint = Some(format!(
+                            "saved {} file(s) to {}",
+                            total_files, dir.display()
+                        ));
+                    }
+                }
                 None => {
                     if let Some(chat) = &mut app.chat {
                         chat.autocomplete_hint = Some(format!("unknown command: :{}", cmd_text));
@@ -1074,7 +1240,7 @@ pub async fn run<S: Store>(
                     match event {
                         Some(Ok(Event::Key(key))) => {
                             if let Some(cmd) = app.on_key(key) {
-                                execute_cmd(&mut app, &mut manager, cmd).await?;
+                                execute_cmd(&mut app, &mut manager, cmd, &mut terminal).await?;
                             }
                         }
                         Some(Ok(Event::Paste(text))) => {
