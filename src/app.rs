@@ -460,68 +460,11 @@ impl App {
                     }
                     KeyCode::Tab => {
                         if let Some(partial) = cmd_so_far.strip_prefix("upload ") {
-                            let partial = partial.trim_start();
-                            let completions = complete_path(partial);
-                            match completions.len() {
-                                0 => {}
-                                1 => {
-                                    chat.mode = Mode::Command(format!("upload {}", completions[0]));
-                                    chat.autocomplete_hint = None;
-                                }
-                                _ => {
-                                    let labels: Vec<String> = completions.iter()
-                                        .map(|c| {
-                                            // Show only the last path component in the hint.
-                                            let p = std::path::Path::new(c.trim_end_matches('/'));
-                                            let name = p.file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or(c);
-                                            if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
-                                        })
-                                        .collect();
-                                    chat.autocomplete_hint = Some(labels.join("  "));
-                                }
-                            }
+                            apply_path_completion("upload", partial, chat);
                         } else if let Some(partial) = cmd_so_far.strip_prefix("download-all ") {
-                            let partial = partial.trim_start();
-                            let completions = complete_path(partial);
-                            match completions.len() {
-                                0 => {}
-                                1 => {
-                                    chat.mode = Mode::Command(format!("download-all {}", completions[0]));
-                                    chat.autocomplete_hint = None;
-                                }
-                                _ => {
-                                    let labels: Vec<String> = completions.iter()
-                                        .map(|c| {
-                                            let p = std::path::Path::new(c.trim_end_matches('/'));
-                                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(c);
-                                            if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
-                                        })
-                                        .collect();
-                                    chat.autocomplete_hint = Some(labels.join("  "));
-                                }
-                            }
+                            apply_path_completion("download-all", partial, chat);
                         } else if let Some(partial) = cmd_so_far.strip_prefix("download ") {
-                            let partial = partial.trim_start();
-                            let completions = complete_path(partial);
-                            match completions.len() {
-                                0 => {}
-                                1 => {
-                                    chat.mode = Mode::Command(format!("download {}", completions[0]));
-                                    chat.autocomplete_hint = None;
-                                }
-                                _ => {
-                                    let labels: Vec<String> = completions.iter()
-                                        .map(|c| {
-                                            let p = std::path::Path::new(c.trim_end_matches('/'));
-                                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(c);
-                                            if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
-                                        })
-                                        .collect();
-                                    chat.autocomplete_hint = Some(labels.join("  "));
-                                }
-                            }
+                            apply_path_completion("download", partial, chat);
                         } else if let Some(partial) = cmd_so_far.strip_prefix("react ") {
                             let partial = partial.trim_start();
                             if !partial.is_empty() && partial.is_ascii() {
@@ -774,6 +717,27 @@ fn complete_path(partial: &str) -> Vec<String> {
         .collect();
     results.sort();
     results
+}
+
+fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
+    let completions = complete_path(partial.trim_start());
+    match completions.len() {
+        0 => {}
+        1 => {
+            chat.mode = Mode::Command(format!("{} {}", cmd_name, completions[0]));
+            chat.autocomplete_hint = None;
+        }
+        _ => {
+            let labels: Vec<String> = completions.iter()
+                .map(|c| {
+                    let p = std::path::Path::new(c.trim_end_matches('/'));
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(c);
+                    if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
+                })
+                .collect();
+            chat.autocomplete_hint = Some(labels.join("  "));
+        }
+    }
 }
 
 // ── Cursor movement helpers ───────────────────────────────────────────────────

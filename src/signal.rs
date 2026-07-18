@@ -184,9 +184,8 @@ pub fn unique_path(dir: &Path, filename: &str) -> PathBuf {
     if !candidate.exists() {
         return candidate;
     }
-    let p = Path::new(filename);
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
-    let ext  = p.extension().and_then(|e| e.to_str());
+    let stem = candidate.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
+    let ext  = candidate.extension().and_then(|e| e.to_str());
     for n in 1u32.. {
         let name = match ext {
             Some(e) => format!("{}_{}.{}", stem, n, e),
