@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
 ### Added
+- Attachment download: `:download` saves attachments from the selected message to `$HOME/Downloads/sst/<chat name>/`; `:download-all` downloads every attachment in the chat. Both commands accept an optional path argument to override the default directory. Filename collisions are resolved by inserting `_N` before the extension (`image.png` → `image_1.png`). Progress is shown on the status bar and updated per-file; files are written atomically so a mid-process kill never leaves a partial file.
 - File attachments: `:upload <path>` stages a file (validates immediately via metadata); multiple `:upload` calls accumulate in the attachment bar shown below the status bar. All staged attachments are uploaded and included when the next message is sent or replied. If a file becomes unavailable at send time, only that file is removed and the send is aborted; the user can re-add it and retry
 - Path Tab-completion in `:upload`: Tab after a partial path completes to the unique match or lists candidates; directories get a trailing `/` so Tab can chain through multiple levels without retyping
 - Paste now works in Command mode: newlines are collapsed to spaces, so a full path can be pasted directly into `:upload <paste>`

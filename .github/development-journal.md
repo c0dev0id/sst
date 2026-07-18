@@ -87,6 +87,17 @@ Attachment handling is split into three phases to keep failures contained:
 
 GIF flag value (8) is defined in `SignalService.proto` `AttachmentPointer.Flags` enum. It is NOT exposed via `AttachmentSpec` or set automatically by presage/libsignal-service-rs — confirmed in `sender.rs`.
 
+### Attachment download pipeline
+
+`manager.get_attachment(&self, pointer)` takes `&self` (not `&mut self`), downloads and decrypts the full file into a `Vec<u8>` before returning. This means:
+- No partial-file risk from a kill mid-download: nothing is written until all bytes are in memory.
+- Files are written atomically: we write to `path.tmp`, then `fs::rename` to the final path. A kill mid-write leaves only an orphaned `.tmp`, never a partial real file.
+- `&self` avoids borrow conflicts when the caller also needs `&mut app` to update the status bar hint.
+
+`execute_cmd` now takes `&mut Terminal<CrosstermBackend<Stdout>>` so it can redraw between files during `:download-all`. This is the only practical way to show live progress without spawning a thread or adding a channel — the event loop is blocked while `execute_cmd` awaits, so `terminal.draw()` must be called explicitly.
+
+Filename collisions are resolved by `unique_path()` which inserts `_N` before the extension. The default download directory is `$HOME/Downloads/sst/<safe_thread_name>/`; path separators in the thread name are replaced with `_` to avoid directory traversal.
+
 ### Attachment bar / navigation ring
 
 `selected_message` and `selected_attachment` are mutually exclusive in `ChatState`. Navigation in Normal mode forms a circular ring: oldest message → … → newest message → first staged file → … → last staged file → oldest message (k is fully symmetric). This avoids two separate navigation contexts and lets the user move naturally from reviewing messages to checking/removing queued files.
