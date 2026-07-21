@@ -102,6 +102,23 @@ Filename collisions are resolved by `unique_path()` which inserts `_N` before th
 
 `selected_message` and `selected_attachment` are mutually exclusive in `ChatState`. Navigation in Normal mode forms a circular ring: oldest message → … → newest message → first staged file → … → last staged file → oldest message (k is fully symmetric). This avoids two separate navigation contexts and lets the user move naturally from reviewing messages to checking/removing queued files.
 
+### CLI subcommand design
+
+The old CLI used ad-hoc boolean flags (`--list`, `--send`, `--read-stream`, etc.) which had inconsistent naming and no machine-readable output story. The redesign uses clap subcommands:
+
+- `sst` (no args) → TUI
+- `sst link` → QR device linking
+- `sst chats [--format=text|json]` → list all threads
+- `sst contacts [--format=text|json]` → list contacts + groups
+- `sst print [--format=text|json] <uuid>` → full message history
+- `sst print-last [-n N] [--format=text|json] <uuid>` → last N messages (default 1)
+- `sst watch [--format=text|json] <uuid>` → stream incoming messages
+- `sst send <uuid> [text] [--attach <path>]…` → send; reads stdin if no positional text
+
+Global `--db <path>` overrides the store location for all subcommands.
+
+`--format=json` outputs one JSON object per line (NDJSON). `--format=text` (default) outputs human-readable lines. `Format` uses `#[derive(ValueEnum)]` with `impl Display` so clap can display the default in `--help`. PascalCase variants become kebab-case automatically (`PrintLast` → `print-last`).
+
 ## Core Features
 
 See `README.md` for the full UX specification. High-level:

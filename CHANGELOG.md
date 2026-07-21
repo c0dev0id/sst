@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- CLI redesigned from ad-hoc flags to a consistent subcommand interface: `sst link`, `sst chats`, `sst contacts`, `sst print <uuid>`, `sst print-last [-n N] <uuid>`, `sst watch <uuid>`, `sst send <uuid> [text] [--attach <path>]…`. Running `sst` with no subcommand opens the TUI as before. All subcommands accept `--format=text|json` for machine-readable output. A global `--db <path>` flag overrides the default store location.
+
 ### Fixed
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
