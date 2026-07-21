@@ -132,12 +132,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(args: Args) -> anyhow::Result<()> {
-    let db_path = args.db.unwrap_or_else(|| {
-        ProjectDirs::from("", "", "sst")
-            .expect("could not determine data directory")
+    let db_path = match args.db {
+        Some(p) => p,
+        None => ProjectDirs::from("", "", "sst")
+            .context("could not determine data directory (is $HOME set?)")?
             .data_dir()
-            .join("db")
-    });
+            .join("db"),
+    };
     let data_dir = db_path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
 

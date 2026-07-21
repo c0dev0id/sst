@@ -14,7 +14,7 @@ sst link
 
 Prints a QR code in the terminal. Scan it from **Signal → Settings → Linked Devices → Link New Device**. On success the app proceeds to the Chat List.
 
-Data (SQLite store, session keys, cached contacts) lives in `~/.local/share/sst` by default.
+Data (SQLite store, session keys, cached contacts) lives in `~/.local/share/sst` by default. Tracing output is written to `~/.local/share/sst/sst.log`. Set `RUST_LOG=debug` (or `RUST_LOG=presage=debug`) to increase verbosity.
 
 ---
 

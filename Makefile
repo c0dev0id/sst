@@ -1,4 +1,4 @@
-BINDIR = /home/sdk/.bin
+BINDIR = $(HOME)/.bin
 DEBUG_BIN   = target/debug/sst
 RELEASE_BIN = target/release/sst
 
