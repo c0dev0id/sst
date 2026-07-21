@@ -156,7 +156,7 @@ Shows key hints by default. While a message is selected, shows sender, timestamp
 
 ## CLI
 
-`sst` works non-interactively for scripting. All subcommands share the same SQLite store — do not run them concurrently with the TUI or each other, as concurrent writes will corrupt the Signal session.
+`sst` works non-interactively for scripting. `send`, `print`, and `print-last` are one-shot operations and can run concurrently with the TUI or `sst watch`. All other subcommands (`chats`, `contacts`, `watch`, `link`) maintain persistent connections or sync session state and are protected by an exclusive lock — running two of these simultaneously will fail with a clear error.
 
 ```
 sst help [SUBCOMMAND]

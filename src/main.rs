@@ -142,24 +142,39 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let data_dir = db_path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
 
-    // Prevent concurrent instances from corrupting the Signal session state.
-    // Two Manager instances on the same SQLite store will diverge their in-memory
-    // ratchet/sender-key state, causing messages to appear sent locally but fail
-    // to decrypt on all recipients.
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(data_dir.join("sst.lock"))
-        .context("failed to open lock file")?;
-    let mut lock_holder = fd_lock::RwLock::new(lock_file);
-    let _lock_guard = lock_holder.try_write().map_err(|_| {
-        anyhow::anyhow!(
-            "another sst instance is already running\n\
-             (only one instance may use the Signal session at a time)"
-        )
-    })?;
+    // send/print/print-last are one-shot operations (pure reads or a single
+    // atomic DB write) that do not hold a persistent Signal WebSocket.  They
+    // are safe to run concurrently with the TUI or `sst watch`, so they skip
+    // the exclusive lock.  All other subcommands maintain persistent
+    // connections or sync session state and must hold the exclusive lock to
+    // prevent ratchet divergence.
+    let needs_lock = !matches!(
+        args.cmd,
+        Some(Cmd::Send { .. }) | Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. })
+    );
 
-    if matches!(args.cmd, Some(Cmd::Link)) {
+    if needs_lock {
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(data_dir.join("sst.lock"))
+            .context("failed to open lock file")?;
+        let mut lock_holder = fd_lock::RwLock::new(lock_file);
+        // _lock_guard stays alive for the entire body below (until this block ends).
+        let _lock_guard = lock_holder.try_write().map_err(|_| {
+            anyhow::anyhow!(
+                "another sst instance is already running\n\
+                 (only one instance may use the Signal session at a time)"
+            )
+        })?;
+        run_inner(args.cmd, db_path, data_dir).await
+    } else {
+        run_inner(args.cmd, db_path, data_dir).await
+    }
+}
+
+async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
+    if matches!(cmd, Some(Cmd::Link)) {
         if db_path.exists() {
             eprintln!("Warning: this will wipe the local database at {}", db_path.display());
             eprintln!("All locally stored messages and contacts will be lost.");
@@ -202,7 +217,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.cmd, store, data_dir)).await
+    local.run_until(run(cmd, store, data_dir)).await
 }
 
 async fn run<S: Store>(
