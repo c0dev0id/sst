@@ -3,10 +3,11 @@ mod signal;
 mod ui;
 
 use anyhow::Context as _;
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use futures::{StreamExt, channel::oneshot, future};
 use presage::libsignal_service::configuration::SignalServers;
+use presage::libsignal_service::content::Content;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::libsignal_service::prelude::Uuid;
@@ -23,29 +24,95 @@ use tracing::error;
 // Spawn the runtime on a thread with a generous stack instead.
 const STACK_SIZE: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, ValueEnum)]
+enum Format {
+    Text,
+    Json,
+}
+
+impl std::fmt::Display for Format {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Format::Text => write!(f, "text"),
+            Format::Json => write!(f, "json"),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[clap(about = "Signal TUI client")]
 struct Args {
-    #[clap(long, help = "Re-link this device even if already registered")]
-    relink: bool,
-
-    #[clap(long, help = "Sync messages and print chat list, then exit")]
-    list: bool,
-
-    #[clap(long, help = "Sync contacts and print all contacts and groups, then exit")]
-    contact_list: bool,
-
-    #[clap(long, value_name = "UUID|HEX", help = "Send stdin as a message to a contact (UUID) or group (64-char hex)")]
-    send: Option<String>,
-
-    #[clap(long, value_name = "UUID|HEX", help = "Print full chat history as JSONL, then exit")]
-    read: Option<String>,
-
-    #[clap(long, value_name = "UUID|HEX", help = "Stream new incoming messages as JSONL (no history; runs until stream closes)")]
-    read_stream: Option<String>,
-
     #[clap(long, help = "Path to the SQLite database (default: XDG data dir)")]
     db: Option<PathBuf>,
+
+    #[clap(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Link this device via QR code; wipes existing session if already registered
+    Link,
+
+    /// List chats sorted by most recent activity
+    Chats {
+        #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
+        format: Format,
+    },
+
+    /// List all contacts and groups
+    Contacts {
+        #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
+        format: Format,
+    },
+
+    /// Print full chat history
+    Print {
+        #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
+        format: Format,
+
+        /// Contact UUID or 64-char group hex key
+        #[clap(value_name = "UUID|HEX")]
+        recipient: String,
+    },
+
+    /// Print the last N messages (default: 1)
+    PrintLast {
+        /// Number of messages to print
+        #[clap(short = 'n', default_value = "1", value_name = "N")]
+        count: usize,
+
+        #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
+        format: Format,
+
+        /// Contact UUID or 64-char group hex key
+        #[clap(value_name = "UUID|HEX")]
+        recipient: String,
+    },
+
+    /// Stream incoming messages (runs until interrupted)
+    Watch {
+        #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
+        format: Format,
+
+        /// Contact UUID or 64-char group hex key
+        #[clap(value_name = "UUID|HEX")]
+        recipient: String,
+    },
+
+    /// Send a message; reads text from stdin if no message argument given
+    Send {
+        /// Contact UUID or 64-char group hex key
+        #[clap(value_name = "UUID|HEX")]
+        recipient: String,
+
+        /// Message text; reads from stdin if omitted
+        text: Option<String>,
+
+        /// Attach a file (can be repeated)
+        #[clap(long, value_name = "PATH")]
+        attach: Vec<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -91,7 +158,9 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         )
     })?;
 
-    if args.relink {
+    let do_link = matches!(args.cmd, Some(Cmd::Link));
+
+    if do_link {
         if db_path.exists() {
             eprintln!("Warning: this will wipe the local database at {}", db_path.display());
             eprintln!("All locally stored messages and contacts will be lost.");
@@ -112,26 +181,19 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         eprintln!("Database wiped. Linking new device…");
     }
 
+    // Always log to file; CLI output goes to stdout, status messages to stderr.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir.join("sst.log"))?;
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::metadata::LevelFilter::WARN.into())
         .from_env_lossy()
         .add_directive("libsignal=error".parse().unwrap());
-
-    if args.list {
-        tracing_subscriber::fmt::fmt()
-            .with_writer(std::io::stderr)
-            .with_env_filter(filter)
-            .init();
-    } else {
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(data_dir.join("sst.log"))?;
-        tracing_subscriber::fmt::fmt()
-            .with_writer(std::sync::Mutex::new(log_file))
-            .with_env_filter(filter)
-            .init();
-    }
+    tracing_subscriber::fmt::fmt()
+        .with_writer(std::sync::Mutex::new(log_file))
+        .with_env_filter(filter)
+        .init();
 
     let store = SqliteStore::open_with_passphrase(
         db_path.to_str().context("non-UTF-8 db path")?,
@@ -142,154 +204,238 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.relink, args.list, args.contact_list, args.send, args.read, args.read_stream, store, data_dir)).await
+    local.run_until(run(args.cmd, do_link, store, data_dir)).await
 }
 
-async fn run<S: Store>(relink: bool, list: bool, contact_list: bool, send: Option<String>, read: Option<String>, read_stream: Option<String>, store: S, data_dir: std::path::PathBuf) -> anyhow::Result<()> {
-    let mut manager = if relink {
+async fn run<S: Store>(
+    cmd: Option<Cmd>,
+    do_link: bool,
+    store: S,
+    data_dir: PathBuf,
+) -> anyhow::Result<()> {
+    let mut manager = if do_link {
         link_device(store).await?
     } else {
         Manager::load_registered(store).await.map_err(|_| {
             anyhow::anyhow!(
-                "No existing registration found. Run with --relink to link this device."
+                "No existing registration found. Run `sst link` to link this device."
             )
         })?
     };
 
     let mut state = signal::SyncState { data_dir, own_aci: None };
 
-    if list {
-        signal::sync(&mut manager, &mut state).await?;
-        let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
-        println!("--- {} chat(s) ---", threads.len());
-        for entry in &threads {
-            let preview = entry.last_preview.as_deref().unwrap_or("(no messages)");
-            println!("{}: {}", entry.name, preview);
+    match cmd {
+        None => {
+            let stream = signal::connect(&mut manager, &mut state).await?;
+            let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
+            app::run(threads, state.own_aci, state.data_dir, manager, stream).await
         }
-        return Ok(());
-    }
 
-    if contact_list {
-        eprintln!("Syncing contacts… (this can take a few seconds)");
-        signal::sync_contacts(&mut manager, &mut state).await?;
-        eprintln!("Fetching missing profiles…");
-        let resolved = signal::fetch_missing_profiles(&mut manager).await
-            .unwrap_or_default();
-        if !resolved.is_empty() {
-            eprintln!("Resolved {} profile(s).", resolved.len());
+        Some(Cmd::Link) => {
+            // Linking already happened above via do_link; nothing left to do.
+            Ok(())
         }
-        if let Some(own_uuid) = state.own_aci {
-            println!("{} Note to Self", own_uuid);
-        }
-        let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
-        for entry in &contacts {
-            match &entry.thread {
-                Thread::Contact(sid) => {
-                    let uuid = sid.raw_uuid();
-                    let name = resolved.get(&uuid).map(String::as_str).unwrap_or(&entry.name);
-                    println!("{} {}", uuid, name);
-                }
-                Thread::Group(key) => {
-                    let hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-                    println!("{} {}", hex, entry.name);
+
+        Some(Cmd::Chats { format }) => {
+            signal::sync(&mut manager, &mut state).await?;
+            let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
+            for entry in &threads {
+                match format {
+                    Format::Text => {
+                        match entry.last_preview.as_deref() {
+                            Some(p) if !p.is_empty() => println!("{}: {}", entry.name, p),
+                            _ => println!("{}", entry.name),
+                        }
+                    }
+                    Format::Json => {
+                        let id = thread_id_string(&entry.thread);
+                        println!("{}", serde_json::json!({
+                            "id":      id,
+                            "name":    entry.name,
+                            "preview": entry.last_preview,
+                            "last_ts": entry.last_ts,
+                        }));
+                    }
                 }
             }
+            Ok(())
         }
-        return Ok(());
-    }
 
-    if let Some(recipient) = send {
-        let thread = parse_thread_id(&recipient)?;
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-        let text = text.trim_end_matches(['\n', '\r']).to_string();
-        if text.is_empty() {
-            anyhow::bail!("nothing to send (stdin was empty)");
-        }
-        signal::send_to_thread(&mut manager, &thread, text, Vec::new()).await?;
-        return Ok(());
-    }
-
-    if let Some(recipient) = read {
-        signal::sync(&mut manager, &mut state).await?;
-        let thread = parse_thread_id(&recipient)?;
-        let messages = signal::load_messages(&manager, &thread).await?;
-        for msg in &messages {
-            let sender_uuid = msg.metadata.sender.raw_uuid();
-            let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
-            let body = signal::message_body(msg);
-            println!("{}", json_line(msg.timestamp(), sender_uuid, &sender_name, &body));
-        }
-        return Ok(());
-    }
-
-    if let Some(recipient) = read_stream {
-        let thread = parse_thread_id(&recipient)?;
-        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        // Only emit messages whose timestamp is at or after this point.
-        // Backlog messages predating the session are silently skipped.
-        let start_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        'reconnect: loop {
-            let mut stream = Box::pin(match manager.receive_messages().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("receive_messages failed: {e}, retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue 'reconnect;
+        Some(Cmd::Contacts { format }) => {
+            eprintln!("Syncing contacts…");
+            signal::sync_contacts(&mut manager, &mut state).await?;
+            let resolved = signal::fetch_missing_profiles(&mut manager).await.unwrap_or_default();
+            let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
+            for entry in &contacts {
+                match &entry.thread {
+                    Thread::Contact(sid) => {
+                        let uuid = sid.raw_uuid();
+                        let name = resolved.get(&uuid).map(String::as_str).unwrap_or(&entry.name);
+                        match format {
+                            Format::Text => println!("{} {}", uuid, name),
+                            Format::Json => println!("{}", serde_json::json!({
+                                "id": uuid.to_string(), "name": name, "type": "contact",
+                            })),
+                        }
+                    }
+                    Thread::Group(key) => {
+                        let hex = hex_string(key);
+                        match format {
+                            Format::Text => println!("{} {}", hex, entry.name),
+                            Format::Json => println!("{}", serde_json::json!({
+                                "id": hex, "name": entry.name, "type": "group",
+                            })),
+                        }
+                    }
                 }
-            });
-
-            // Single loop covers both the backlog drain and live phase.
-            // QueueEmpty is just ignored — we use start_ts to tell old from new.
-            while let Some(event) = stream.next().await {
-                let Received::Content(boxed) = event else { continue };
-                let ts = boxed.timestamp();
-                if ts < start_ts { continue; }
-                if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) { continue; }
-                let body = signal::message_body(&boxed);
-                if body.is_empty() { continue; }
-                if !seen.insert(ts) { continue; }
-                let sender_uuid = boxed.metadata.sender.raw_uuid();
-                let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
-                println!("{}", json_line(ts, sender_uuid, &sender_name, &body));
-                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
+            Ok(())
+        }
 
-            // Stream closed — reconnect after a brief pause.
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Some(Cmd::Print { format, recipient }) => {
+            signal::sync(&mut manager, &mut state).await?;
+            let thread = parse_thread_id(&recipient)?;
+            let messages = signal::load_messages(&manager, &thread).await?;
+            print_messages(&manager, &messages, &format).await;
+            Ok(())
+        }
+
+        Some(Cmd::PrintLast { count, format, recipient }) => {
+            signal::sync(&mut manager, &mut state).await?;
+            let thread = parse_thread_id(&recipient)?;
+            let messages = signal::load_messages(&manager, &thread).await?;
+            let start = messages.len().saturating_sub(count);
+            print_messages(&manager, &messages[start..], &format).await;
+            Ok(())
+        }
+
+        Some(Cmd::Watch { format, recipient }) => {
+            let thread = parse_thread_id(&recipient)?;
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            // Skip backlog; only emit messages arriving from this moment forward.
+            let start_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            'reconnect: loop {
+                let mut stream = Box::pin(match manager.receive_messages().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("receive_messages failed: {e}, retrying in 5s");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue 'reconnect;
+                    }
+                });
+
+                while let Some(event) = stream.next().await {
+                    let Received::Content(boxed) = event else { continue };
+                    let ts = boxed.timestamp();
+                    if ts < start_ts { continue; }
+                    if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) { continue; }
+                    let body = signal::message_body(&boxed);
+                    if body.is_empty() { continue; }
+                    if !seen.insert(ts) { continue; }
+                    let sender_uuid = boxed.metadata.sender.raw_uuid();
+                    let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
+                    let line = format_one(&format, ts, sender_uuid, &sender_name, &body);
+                    println!("{}", line);
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+
+        Some(Cmd::Send { recipient, text, attach }) => {
+            let thread = parse_thread_id(&recipient)?;
+            let text = match text {
+                Some(t) => t,
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf.trim_end_matches(['\n', '\r']).to_string()
+                }
+            };
+            if text.is_empty() && attach.is_empty() {
+                anyhow::bail!("nothing to send (no text and no attachments)");
+            }
+            let mut staged = Vec::new();
+            for path in &attach {
+                staged.push(
+                    signal::stage_attachment(path)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                );
+            }
+            let pointers = if staged.is_empty() {
+                Vec::new()
+            } else {
+                signal::upload_staged_attachments(&mut manager, &staged).await
+                    .map_err(|(msg, _)| anyhow::anyhow!("{}", msg))?
+            };
+            signal::send_to_thread(&mut manager, &thread, text, pointers).await?;
+            Ok(())
         }
     }
-
-    let stream = signal::connect(&mut manager, &mut state).await?;
-    let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
-
-    app::run(threads, state.own_aci, state.data_dir, manager, stream).await
 }
 
-fn json_line(ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str) -> String {
-    use chrono::{DateTime, Utc};
-    let timestamp = DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
-        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
-        .unwrap_or_else(|| ts_ms.to_string());
-    serde_json::json!({
-        "timestamp": timestamp,
-        "sender_uuid": sender_uuid.to_string(),
-        "sender_name": sender_name,
-        "body": body,
-    })
-    .to_string()
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+async fn print_messages<S: Store>(
+    manager: &Manager<S, Registered>,
+    messages: &[Content],
+    format: &Format,
+) {
+    for msg in messages {
+        let sender_uuid = msg.metadata.sender.raw_uuid();
+        let sender_name = signal::lookup_contact_name(manager, sender_uuid).await;
+        let body = signal::message_body(msg);
+        println!("{}", format_one(format, msg.timestamp(), sender_uuid, &sender_name, &body));
+    }
 }
+
+fn format_one(format: &Format, ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str) -> String {
+    match format {
+        Format::Text => {
+            use chrono::{DateTime, Local};
+            let ts = DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
+                .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| ts_ms.to_string());
+            format!("[{}] {}: {}", ts, sender_name, body)
+        }
+        Format::Json => {
+            use chrono::{DateTime, Utc};
+            let ts = DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
+                .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
+                .unwrap_or_else(|| ts_ms.to_string());
+            serde_json::json!({
+                "timestamp":   ts,
+                "sender_uuid": sender_uuid.to_string(),
+                "sender_name": sender_name,
+                "body":        body,
+            }).to_string()
+        }
+    }
+}
+
+fn thread_id_string(thread: &Thread) -> String {
+    match thread {
+        Thread::Contact(sid) => sid.raw_uuid().to_string(),
+        Thread::Group(key)   => hex_string(key),
+    }
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// ── Thread parsing ────────────────────────────────────────────────────────────
 
 fn parse_thread_id(s: &str) -> anyhow::Result<Thread> {
-    // UUID → 1:1 contact thread
     if let Ok(uuid) = s.parse::<Uuid>() {
         return Ok(Thread::Contact(ServiceId::Aci(uuid.into())));
     }
-    // 64 hex chars → group master key
     if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
         let bytes: Vec<u8> = (0..32)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16))
@@ -297,8 +443,13 @@ fn parse_thread_id(s: &str) -> anyhow::Result<Thread> {
         let key: [u8; 32] = bytes.try_into().expect("32 bytes");
         return Ok(Thread::Group(key));
     }
-    anyhow::bail!("invalid recipient '{}': expected a UUID (contact) or 64-char hex string (group)", s)
+    anyhow::bail!(
+        "invalid recipient '{}': expected a UUID (contact) or 64-char hex string (group)",
+        s
+    )
 }
+
+// ── Device linking ────────────────────────────────────────────────────────────
 
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {
     let (tx, rx) = oneshot::channel();
