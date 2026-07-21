@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use anyhow::Context as _;
+use chrono::{DateTime, Local};
 use futures::{Stream, StreamExt};
 use presage::Manager;
 use presage::manager::Registered;
@@ -1071,4 +1072,16 @@ async fn dispatch_send_body<S: Store>(
         }
     }
     Ok(())
+}
+
+pub(crate) fn fmt_ts_short(ts_ms: u64) -> String {
+    DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
+        .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+pub(crate) fn fmt_ts_long(ts_ms: u64) -> String {
+    DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
 }

@@ -158,9 +158,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         )
     })?;
 
-    let do_link = matches!(args.cmd, Some(Cmd::Link));
-
-    if do_link {
+    if matches!(args.cmd, Some(Cmd::Link)) {
         if db_path.exists() {
             eprintln!("Warning: this will wipe the local database at {}", db_path.display());
             eprintln!("All locally stored messages and contacts will be lost.");
@@ -181,7 +179,6 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         eprintln!("Database wiped. Linking new device…");
     }
 
-    // Always log to file; CLI output goes to stdout, status messages to stderr.
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -204,16 +201,15 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(args.cmd, do_link, store, data_dir)).await
+    local.run_until(run(args.cmd, store, data_dir)).await
 }
 
 async fn run<S: Store>(
     cmd: Option<Cmd>,
-    do_link: bool,
     store: S,
     data_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let mut manager = if do_link {
+    let mut manager = if matches!(cmd, Some(Cmd::Link)) {
         link_device(store).await?
     } else {
         Manager::load_registered(store).await.map_err(|_| {
@@ -232,10 +228,7 @@ async fn run<S: Store>(
             app::run(threads, state.own_aci, state.data_dir, manager, stream).await
         }
 
-        Some(Cmd::Link) => {
-            // Linking already happened above via do_link; nothing left to do.
-            Ok(())
-        }
+        Some(Cmd::Link) => Ok(()),
 
         Some(Cmd::Chats { format }) => {
             signal::sync(&mut manager, &mut state).await?;
@@ -312,8 +305,8 @@ async fn run<S: Store>(
 
         Some(Cmd::Watch { format, recipient }) => {
             let thread = parse_thread_id(&recipient)?;
-            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-            // Skip backlog; only emit messages arriving from this moment forward.
+            // BTreeSet allows evicting entries older than the dedup window in O(log n).
+            let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
             let start_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -336,6 +329,11 @@ async fn run<S: Store>(
                     if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) { continue; }
                     let body = signal::message_body(&boxed);
                     if body.is_empty() { continue; }
+                    // Evict timestamps older than 60 s to keep the dedup set bounded.
+                    let horizon = ts.saturating_sub(60_000);
+                    while seen.first().is_some_and(|&t| t < horizon) {
+                        seen.pop_first();
+                    }
                     if !seen.insert(ts) { continue; }
                     let sender_uuid = boxed.metadata.sender.raw_uuid();
                     let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
@@ -387,22 +385,23 @@ async fn print_messages<S: Store>(
     messages: &[Content],
     format: &Format,
 ) {
+    let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
     for msg in messages {
-        let sender_uuid = msg.metadata.sender.raw_uuid();
-        let sender_name = signal::lookup_contact_name(manager, sender_uuid).await;
+        let uuid = msg.metadata.sender.raw_uuid();
+        if !names.contains_key(&uuid) {
+            let name = signal::lookup_contact_name(manager, uuid).await;
+            names.insert(uuid, name);
+        }
+        let sender_name = names.get(&uuid).map(String::as_str).unwrap_or("");
         let body = signal::message_body(msg);
-        println!("{}", format_one(format, msg.timestamp(), sender_uuid, &sender_name, &body));
+        println!("{}", format_one(format, msg.timestamp(), uuid, sender_name, &body));
     }
 }
 
 fn format_one(format: &Format, ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str) -> String {
     match format {
         Format::Text => {
-            use chrono::{DateTime, Local};
-            let ts = DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
-                .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| ts_ms.to_string());
-            format!("[{}] {}: {}", ts, sender_name, body)
+            format!("[{}] {}: {}", signal::fmt_ts_long(ts_ms), sender_name, body)
         }
         Format::Json => {
             use chrono::{DateTime, Utc};

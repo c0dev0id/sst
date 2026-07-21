@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Local};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -251,7 +250,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         // Timestamp separator when gap > 1 hour
         if let Some(prev) = prev_ts {
             if ts.saturating_sub(prev) > 3_600_000 {
-                let sep = format!("── {} ──", fmt_ts_long(ts));
+                let sep = format!("── {} ──", signal::fmt_ts_long(ts));
                 lines.push(Line::raw(""));
                 lines.push(Line::from(Span::styled(
                     format!("{:^width$}", sep, width = area.width as usize),
@@ -277,7 +276,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             let header = Line::from(vec![
                 Span::styled(sender_label.clone(), sender_style),
                 Span::styled(
-                    format!("  {}", fmt_ts_short(ts)),
+                    format!("  {}", signal::fmt_ts_short(ts)),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);
@@ -516,7 +515,7 @@ fn chat_status_bar(app: &App) -> String {
                     let sender_uuid = content.metadata.sender.raw_uuid();
                     let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
                     let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
-                    let ts = fmt_ts_long(content.timestamp());
+                    let ts = signal::fmt_ts_long(content.timestamp());
                     let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
                     return format!(
                         "  [{}]  {}  ·  {}  |  r reply   e edit   d delete   : command   Esc deselect   q back",
@@ -638,19 +637,6 @@ fn wrap_input_line(text: &str, max_width: usize) -> Vec<(String, usize)> {
     result
 }
 
-fn fmt_ts_short(ts_ms: u64) -> String {
-    let secs = (ts_ms / 1000) as i64;
-    DateTime::from_timestamp(secs, 0)
-        .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
-        .unwrap_or_default()
-}
-
-fn fmt_ts_long(ts_ms: u64) -> String {
-    let secs = (ts_ms / 1000) as i64;
-    DateTime::from_timestamp(secs, 0)
-        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_default()
-}
 
 fn format_reactions(map: Option<&HashMap<String, HashSet<[u8; 16]>>>) -> Option<String> {
     let map = map.filter(|m| !m.is_empty())?;
