@@ -9,10 +9,10 @@ Terminal UI client for Signal, written in Rust.
 ## Setup
 
 ```
-sst [--relink] [--data-dir <path>]
+sst link
 ```
 
-On first run (or with `--relink`), a QR code is printed in the terminal. Scan it from **Signal → Settings → Linked Devices → Link New Device**. On success the app proceeds to the Chat List.
+Prints a QR code in the terminal. Scan it from **Signal → Settings → Linked Devices → Link New Device**. On success the app proceeds to the Chat List.
 
 Data (SQLite store, session keys, cached contacts) lives in `~/.local/share/sst` by default.
 
@@ -154,77 +154,108 @@ Shows key hints by default. While a message is selected, shows sender, timestamp
 
 ---
 
-## CLI Usage
+## CLI
 
-In addition to the TUI, `sst` exposes several non-interactive commands for scripting and automation. All CLI modes share the same SQLite database as the TUI — **do not run them concurrently with `sst` or with each other**, as concurrent writes will corrupt the database.
+`sst` works non-interactively for scripting. All subcommands share the same SQLite store — do not run them concurrently with the TUI or each other, as concurrent writes will corrupt the Signal session.
 
-### List chats
-
-```sh
-sst --list
+```
+sst help [SUBCOMMAND]
+sst link
+sst chats            [--format=text|json]
+sst contacts         [--format=text|json]
+sst print            [--format=text|json] <UUID|HEX>
+sst print-last [-n N][--format=text|json] <UUID|HEX>
+sst watch            [--format=text|json] <UUID|HEX>
+sst send <UUID|HEX> [TEXT] [--attach <PATH>]…
 ```
 
-Syncs new messages, then prints all conversations with a one-line preview to stdout.
+`<UUID|HEX>` is a contact UUID or a 64-character hex group master key (as shown by `sst contacts`).
 
-### List contacts
+`--format=json` outputs one JSON object per line (NDJSON). `--format=text` (default) outputs human-readable lines.
+
+### link
 
 ```sh
-sst --contact-list
+sst link
 ```
 
-Syncs the contact list from the primary device, then prints `<uuid> <name>` for every known contact and group to stdout. For contacts with no name (group members not in the phone's address book), a Signal profile fetch is attempted using any cached profile key — resolved names are shown immediately and cached locally for future use.
+Wipes the existing session (with confirmation) and re-links via QR code.
+
+### chats
+
+```sh
+sst chats
+sst chats --format=json
+```
+
+Syncs new messages, then lists all threads sorted by most recent activity.
+
+### contacts
+
+```sh
+sst contacts
+sst contacts --format=json
+```
+
+Syncs the contact list from the primary device, then prints every known contact and group. For contacts with no name (group members not in the phone's address book), a profile fetch is attempted using any cached profile key.
 
 ```
 96c9d3f9-fccf-4517-a0a8-f4bf72a63e48 Note to Self
 3fa85f64-5717-4562-b3fc-2c963f66afa6 Alice Wagner
-7c9e6679-7425-40de-944b-e07fc1f90ae7 Bob Richter
 a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 Family Group
 ```
 
-Groups are identified by a 64-character hex master key instead of a UUID.
-
-### Send a message
+### print
 
 ```sh
-echo "Hello!" | sst --send <UUID|HEX>
-printf "Line one\nLine two" | sst --send <UUID|HEX>
+sst print 3fa85f64-5717-4562-b3fc-2c963f66afa6
+sst print --format=json 3fa85f64-5717-4562-b3fc-2c963f66afa6
 ```
 
-Reads the message body from stdin and sends it to the given contact (UUID) or group (64-char hex). Trailing newlines are stripped.
+Syncs new messages, then prints the full chat history.
 
-### Read chat history
-
-```sh
-sst --read <UUID|HEX>
+```
+[2026-07-01 09:14] Alice Wagner: Hey!
+[2026-07-01 09:31] You: Sure, sounds good!
 ```
 
-Syncs new messages, then prints the full chat history to stdout as JSONL (one JSON object per line):
-
+JSON format:
 ```json
 {"timestamp":"2026-07-01T09:14:00Z","sender_uuid":"3fa85f64-...","sender_name":"Alice Wagner","body":"Hey!"}
 ```
 
-### Stream incoming messages
+### print-last
 
 ```sh
-sst --read-stream <UUID|HEX>
+sst print-last 3fa85f64-5717-4562-b3fc-2c963f66afa6        # last message
+sst print-last -n 10 3fa85f64-5717-4562-b3fc-2c963f66afa6  # last 10
 ```
 
-Connects to Signal and streams new incoming messages from the given thread to stdout as JSONL. Runs until interrupted. Only messages received after startup are emitted — backlog is silently discarded.
+### watch
 
 ```sh
-# Forward all incoming messages from Alice to a file:
-sst --read-stream 3fa85f64-5717-4562-b3fc-2c963f66afa6 >> alice.jsonl
+sst watch 3fa85f64-5717-4562-b3fc-2c963f66afa6
+sst watch --format=json 3fa85f64-5717-4562-b3fc-2c963f66afa6 >> alice.jsonl
 ```
 
-Note: messages you send via `--send` will not appear on `--read-stream` running on the same device — Signal does not echo sent messages back to the originating device.
+Streams new incoming messages from a thread. Runs until interrupted; backlog is silently skipped. Reconnects automatically if the Signal WebSocket closes.
 
-### Custom database path
-
-All modes accept `--db <path>` to override the default database location:
+### send
 
 ```sh
-sst --db /tmp/test.db --relink
+sst send 3fa85f64-5717-4562-b3fc-2c963f66afa6 "Hello!"
+echo "Hello!" | sst send 3fa85f64-5717-4562-b3fc-2c963f66afa6
+sst send 3fa85f64-5717-4562-b3fc-2c963f66afa6 "See attached" --attach photo.jpg --attach doc.pdf
+```
+
+Reads message text from the positional argument or from stdin if omitted. `--attach` can be repeated.
+
+### --db
+
+All subcommands accept `--db <PATH>` to override the default store location:
+
+```sh
+sst --db /tmp/test.db link
 ```
 
 ---
