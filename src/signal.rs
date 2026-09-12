@@ -117,6 +117,8 @@ pub(crate) fn kind_from_mime(mime: &str) -> &'static str {
     else { "file" }
 }
 
+// Signal caps attachments at ~100 MB, well below the u64→f64 precision boundary (2^53).
+#[allow(clippy::cast_precision_loss)]
 pub fn fmt_attachment_size(bytes: u64) -> String {
     if bytes < 1_024 {
         format!("{} B", bytes)
@@ -996,6 +998,8 @@ pub async fn send_read_receipt<S: Store>(
     Ok(())
 }
 
+// u128 → u64 truncation only matters past year ~584 million.
+#[allow(clippy::cast_possible_truncation)]
 fn now_millis() -> anyhow::Result<u64> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1061,12 +1065,15 @@ async fn dispatch_send_body<S: Store>(
     Ok(())
 }
 
+// Signal timestamps (unix ms) wrap i64 only past year ~292 billion.
+#[allow(clippy::cast_possible_wrap)]
 pub(crate) fn fmt_ts_short(ts_ms: u64) -> String {
     DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
         .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
         .unwrap_or_default()
 }
 
+#[allow(clippy::cast_possible_wrap)]
 pub(crate) fn fmt_ts_long(ts_ms: u64) -> String {
     DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())

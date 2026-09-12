@@ -128,6 +128,8 @@ fn draw_contact_list(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
     // Normal and Command modes use a fixed 2-line input area (border + one hint/command line).
     // Insert mode grows with the draft text, accounting for word-wrap at the current width.
+    // usize → u16: terminals never approach 65535 visible rows.
+    #[allow(clippy::cast_possible_truncation)]
     let input_height = if let Some(chat) = app.chat.as_ref() {
         if matches!(chat.mode, Mode::Insert) {
             let wrap_width = f.area().width.saturating_sub(2) as usize;
@@ -371,6 +373,8 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     chat.viewport_top_msg = msg_visual_starts
         .partition_point(|&s| s <= scroll_row)
         .saturating_sub(1);
+    // ratatui's Paragraph::scroll takes u16; realistic chats stay well under 65535 lines.
+    #[allow(clippy::cast_possible_truncation)]
     f.render_widget(Paragraph::new(Text::from(lines)).scroll((scroll_row as u16, 0)), area);
 }
 

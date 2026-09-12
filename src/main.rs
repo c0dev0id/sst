@@ -327,6 +327,8 @@ async fn run<S: Store>(
             // BTreeSet allows evicting entries older than the dedup window in O(log n).
             let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
             let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+            // u128 → u64 truncation only matters past year ~584 million.
+            #[allow(clippy::cast_possible_truncation)]
             let start_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -434,6 +436,8 @@ fn format_one(format: &Format, ts_ms: u64, sender_uuid: Uuid, sender_name: &str,
         }
         Format::Json => {
             use chrono::{DateTime, Utc};
+            // Signal timestamps (unix ms) wrap i64 only past year ~292 billion.
+            #[allow(clippy::cast_possible_wrap)]
             let ts = DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
                 .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
                 .unwrap_or_else(|| ts_ms.to_string());
