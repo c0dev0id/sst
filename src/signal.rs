@@ -673,14 +673,6 @@ pub async fn load_sender_names<S: Store>(
     map
 }
 
-pub async fn load_messages<S: Store>(
-    manager: &Manager<S, Registered>,
-    thread: &Thread,
-) -> anyhow::Result<Vec<Content>> {
-    Ok(load_messages_and_reactions(manager, thread).await?.0)
-}
-
-
 /// Extract (target_sent_timestamp, new_body) from an EditMessage or a SyncMessage
 /// wrapping an edit (sent by us on another device). Returns None for all other content.
 fn extract_edit(content: &Content) -> Option<(u64, String)> {

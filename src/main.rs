@@ -306,7 +306,7 @@ async fn run<S: Store>(
         Some(Cmd::Print { format, recipient }) => {
             signal::sync(&mut manager, &mut state).await?;
             let thread = parse_thread_id(&recipient)?;
-            let messages = signal::load_messages(&manager, &thread).await?;
+            let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             print_messages(&manager, &messages, &format).await;
             Ok(())
         }
@@ -314,7 +314,7 @@ async fn run<S: Store>(
         Some(Cmd::PrintLast { count, format, recipient }) => {
             signal::sync(&mut manager, &mut state).await?;
             let thread = parse_thread_id(&recipient)?;
-            let messages = signal::load_messages(&manager, &thread).await?;
+            let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             let start = messages.len().saturating_sub(count);
             print_messages(&manager, &messages[start..], &format).await;
             Ok(())
