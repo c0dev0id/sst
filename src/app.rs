@@ -237,6 +237,24 @@ impl App {
             Mode::Command(_) => 2,
         };
 
+        // PgUp/PgDn scroll the message viewport in Normal and Insert modes;
+        // Command mode ignores them so typing a command isn't interrupted.
+        if mode_disc != 2 {
+            match key.code {
+                KeyCode::PageUp => {
+                    let h = chat.viewport_height as usize;
+                    chat.scroll = chat.scroll.saturating_add(h);
+                    return None;
+                }
+                KeyCode::PageDown => {
+                    let h = chat.viewport_height as usize;
+                    chat.scroll = chat.scroll.saturating_sub(h);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         match mode_disc {
             0 => { // Normal mode
                 match key.code {
@@ -355,14 +373,6 @@ impl App {
                             }
                         }
                     }
-                    KeyCode::PageUp => {
-                        let h = chat.viewport_height as usize;
-                        chat.scroll = chat.scroll.saturating_add(h);
-                    }
-                    KeyCode::PageDown => {
-                        let h = chat.viewport_height as usize;
-                        chat.scroll = chat.scroll.saturating_sub(h);
-                    }
                     _ => {}
                 }
             }
@@ -382,14 +392,6 @@ impl App {
                     }
                     KeyCode::Down => {
                         chat.cursor = cursor_down(&chat.input, chat.cursor);
-                    }
-                    KeyCode::PageUp => {
-                        let h = chat.viewport_height as usize;
-                        chat.scroll = chat.scroll.saturating_add(h);
-                    }
-                    KeyCode::PageDown => {
-                        let h = chat.viewport_height as usize;
-                        chat.scroll = chat.scroll.saturating_sub(h);
                     }
                     // Shift+Enter or Alt+Enter → newline.
                     // Shift+Enter is only distinguishable from Enter on terminals that
