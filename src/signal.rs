@@ -859,7 +859,6 @@ pub async fn send_reaction<S: Store>(
         target_author_aci: Some(target_author.to_string()),
         target_author_aci_binary: Some(target_author.as_bytes().to_vec()),
         target_sent_timestamp: Some(target_ts),
-        ..Default::default()
     };
     let data_message = DataMessage {
         reaction: Some(reaction),
