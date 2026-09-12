@@ -271,9 +271,9 @@ async fn drain_backlog<S: Store>(
         }
     }
 
-    let mut known_groups = load_group_keys(&state.groups_path());
+    let mut known_groups = load_chunks::<32>(&state.groups_path());
     known_groups.extend(seen_group_keys);
-    let _ = save_group_keys(&state.groups_path(), &known_groups);
+    let _ = save_chunks(&state.groups_path(), &known_groups);
 
     for key in &known_groups {
         if manager.store().group(*key).await?.is_some() {
@@ -289,9 +289,9 @@ async fn drain_backlog<S: Store>(
         }
     }
 
-    let mut known_contacts = load_contact_uuids(&state.contacts_path());
+    let mut known_contacts = load_chunks::<16>(&state.contacts_path());
     known_contacts.extend(seen_contact_uuids);
-    let _ = save_contact_uuids(&state.contacts_path(), &known_contacts);
+    let _ = save_chunks(&state.contacts_path(), &known_contacts);
 
     if let Err(e) = manager.request_contacts().await {
         eprintln!("Warning: could not request contact sync: {e}");
@@ -414,7 +414,7 @@ pub async fn list_threads<S: Store>(
         }
     }
 
-    for uuid_bytes in load_contact_uuids(&data_dir.join("known_contacts")) {
+    for uuid_bytes in load_chunks::<16>(&data_dir.join("known_contacts")) {
         let uuid = Uuid::from_bytes(uuid_bytes);
         if seen.contains(&uuid) {
             continue;
@@ -536,29 +536,19 @@ fn contact_display_name(contact: &presage::model::contacts::Contact) -> String {
         .unwrap_or_else(|| contact.uuid.to_string())
 }
 
-fn load_group_keys(path: &Path) -> HashSet<[u8; 32]> {
+// On-disk format for both known contacts (16-byte UUIDs) and known group
+// master keys (32-byte blobs): a flat concatenation of fixed-size chunks.
+// The chunk size is compile-time via const generic N.
+fn load_chunks<const N: usize>(path: &Path) -> HashSet<[u8; N]> {
     std::fs::read(path)
         .unwrap_or_default()
-        .chunks_exact(32)
+        .chunks_exact(N)
         .filter_map(|c| c.try_into().ok())
         .collect()
 }
 
-fn save_group_keys(path: &Path, keys: &HashSet<[u8; 32]>) -> std::io::Result<()> {
-    let bytes: Vec<u8> = keys.iter().flat_map(|k| k.iter().copied()).collect();
-    std::fs::write(path, bytes)
-}
-
-fn load_contact_uuids(path: &Path) -> HashSet<[u8; 16]> {
-    std::fs::read(path)
-        .unwrap_or_default()
-        .chunks_exact(16)
-        .filter_map(|c| c.try_into().ok())
-        .collect()
-}
-
-fn save_contact_uuids(path: &Path, uuids: &HashSet<[u8; 16]>) -> std::io::Result<()> {
-    let bytes: Vec<u8> = uuids.iter().flat_map(|k| k.iter().copied()).collect();
+fn save_chunks<const N: usize>(path: &Path, items: &HashSet<[u8; N]>) -> std::io::Result<()> {
+    let bytes: Vec<u8> = items.iter().flat_map(|k| k.iter().copied()).collect();
     std::fs::write(path, bytes)
 }
 
