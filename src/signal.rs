@@ -37,6 +37,15 @@ pub struct ThreadEntry {
     pub unread: bool,
 }
 
+impl ThreadEntry {
+    // Constructors never set unread=true: the data source doesn't know
+    // whether the user has seen the message. Only App::on_signal marks
+    // a thread unread when a live event arrives.
+    pub fn new(thread: Thread, name: String, last_preview: Option<String>, last_ts: u64) -> Self {
+        Self { thread, name, last_preview, last_ts, unread: false }
+    }
+}
+
 pub struct MessageUpdate {
     pub thread: Thread,
     pub preview: String,
@@ -412,7 +421,7 @@ pub async fn list_threads<S: Store>(
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
-            entries.push(ThreadEntry { thread, name, last_preview, last_ts, unread: false });
+            entries.push(ThreadEntry::new(thread, name, last_preview, last_ts));
         }
     }
 
@@ -430,7 +439,7 @@ pub async fn list_threads<S: Store>(
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
-            entries.push(ThreadEntry { thread, name, last_preview, last_ts, unread: false });
+            entries.push(ThreadEntry::new(thread, name, last_preview, last_ts));
         }
     }
 
@@ -439,7 +448,7 @@ pub async fn list_threads<S: Store>(
         let thread = Thread::Group(master_key);
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
-            entries.push(ThreadEntry { thread, name: group.title, last_preview, last_ts, unread: false });
+            entries.push(ThreadEntry::new(thread, group.title, last_preview, last_ts));
         }
     }
 
@@ -464,7 +473,7 @@ pub async fn list_all_contacts<S: Store>(
         let service_id = ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
         let name = contact_display_name(&contact);
-        contact_entries.push(ThreadEntry { thread, name, last_preview: None, last_ts: 0, unread: false });
+        contact_entries.push(ThreadEntry::new(thread, name, None, 0));
     }
     contact_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let contacts_len = contact_entries.len();
@@ -473,7 +482,7 @@ pub async fn list_all_contacts<S: Store>(
     for result in manager.store().groups().await? {
         let (master_key, group) = result?;
         let thread = Thread::Group(master_key);
-        group_entries.push(ThreadEntry { thread, name: group.title, last_preview: None, last_ts: 0, unread: false });
+        group_entries.push(ThreadEntry::new(thread, group.title, None, 0));
     }
     group_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
