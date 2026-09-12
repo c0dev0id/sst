@@ -157,6 +157,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         let lock_file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .open(data_dir.join("sst.lock"))
             .context("failed to open lock file")?;
         let mut lock_holder = fd_lock::RwLock::new(lock_file);
