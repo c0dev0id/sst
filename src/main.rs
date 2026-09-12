@@ -326,6 +326,7 @@ async fn run<S: Store>(
             let thread = parse_thread_id(&recipient)?;
             // BTreeSet allows evicting entries older than the dedup window in O(log n).
             let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+            let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
             let start_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -355,7 +356,7 @@ async fn run<S: Store>(
                     }
                     if !seen.insert(ts) { continue; }
                     let sender_uuid = boxed.metadata.sender.raw_uuid();
-                    let sender_name = signal::lookup_contact_name(&manager, sender_uuid).await;
+                    let sender_name = cached_sender_name(&mut names, &manager, sender_uuid).await;
                     let line = format_one(&format, ts, sender_uuid, &sender_name, &body);
                     println!("{}", line);
                     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -399,6 +400,19 @@ async fn run<S: Store>(
 
 // ── Output helpers ────────────────────────────────────────────────────────────
 
+async fn cached_sender_name<S: Store>(
+    cache: &mut std::collections::HashMap<Uuid, String>,
+    manager: &Manager<S, Registered>,
+    uuid: Uuid,
+) -> String {
+    if let Some(name) = cache.get(&uuid) {
+        return name.clone();
+    }
+    let name = signal::lookup_contact_name(manager, uuid).await;
+    cache.insert(uuid, name.clone());
+    name
+}
+
 async fn print_messages<S: Store>(
     manager: &Manager<S, Registered>,
     messages: &[Content],
@@ -407,15 +421,9 @@ async fn print_messages<S: Store>(
     let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
     for msg in messages {
         let uuid = msg.metadata.sender.raw_uuid();
-        let sender_name: &str = match names.entry(uuid) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let name = signal::lookup_contact_name(manager, uuid).await;
-                e.insert(name)
-            }
-        };
+        let sender_name = cached_sender_name(&mut names, manager, uuid).await;
         let body = signal::message_body(msg);
-        println!("{}", format_one(format, msg.timestamp(), uuid, sender_name, &body));
+        println!("{}", format_one(format, msg.timestamp(), uuid, &sender_name, &body));
     }
 }
 
