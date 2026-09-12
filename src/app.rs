@@ -415,16 +415,16 @@ impl App {
                         chat.cursor += c.len_utf8();
                     }
                     KeyCode::Tab => {
-                        if let Some((start, end, candidates, display)) =
+                        if let Some(span) =
                             completion_candidates(&chat.input, chat.cursor, &chat.sender_names)
                         {
-                            if candidates.len() == 1 {
-                                let rep = candidates[0].clone();
-                                chat.input.replace_range(start..end, &rep);
-                                chat.cursor = start + rep.len();
+                            if span.values.len() == 1 {
+                                let rep = span.values[0].clone();
+                                chat.input.replace_range(span.start..span.end, &rep);
+                                chat.cursor = span.start + rep.len();
                                 chat.autocomplete_hint = None;
                             } else {
-                                let labels = display.as_deref().unwrap_or(&candidates);
+                                let labels = span.display.as_deref().unwrap_or(&span.values);
                                 chat.autocomplete_hint = Some(labels.join("  "));
                             }
                         }
@@ -645,13 +645,19 @@ fn reaction_hint(reactions: &ReactionMap, target_ts: u64) -> String {
 
 // ── Tab completion ────────────────────────────────────────────────────────────
 
-// Returns (replace_start, replace_end, completion_values, display_labels).
-// display_labels is Some when the hint text should differ from the completion values.
+pub struct CompletionSpan {
+    pub start: usize,
+    pub end: usize,
+    pub values: Vec<String>,
+    // Some when the hint text should differ from the completion values.
+    pub display: Option<Vec<String>>,
+}
+
 fn completion_candidates(
     input: &str,
     cursor: usize,
     sender_names: &HashMap<Uuid, String>,
-) -> Option<(usize, usize, Vec<String>, Option<Vec<String>>)> {
+) -> Option<CompletionSpan> {
     let before = &input[..cursor.min(input.len())];
 
     if let Some(at_pos) = before.rfind('@') {
@@ -667,7 +673,12 @@ fn completion_candidates(
             if candidates.is_empty() {
                 return None;
             }
-            return Some((at_pos, cursor, candidates, None));
+            return Some(CompletionSpan {
+                start: at_pos,
+                end: cursor,
+                values: candidates,
+                display: None,
+            });
         }
     }
 
