@@ -829,11 +829,11 @@ async fn reload_chat<S: Store>(
     thread: &Thread,
     chat: &mut Option<ChatState>,
 ) {
-    if let Ok((msgs, rxns)) = signal::load_messages_and_reactions(manager, thread).await {
-        if let Some(c) = chat {
-            c.messages = msgs;
-            c.reactions = rxns;
-        }
+    if let Ok((msgs, rxns)) = signal::load_messages_and_reactions(manager, thread).await
+        && let Some(c) = chat
+    {
+        c.messages = msgs;
+        c.reactions = rxns;
     }
 }
 
@@ -1251,39 +1251,39 @@ pub async fn run<S: Store>(
                     if let Some(received) = event {
                         app.on_signal(received);
                         // Reload chat messages and receipt state on any incoming event.
-                        if matches!(app.view, View::ChatWindow) {
-                            if let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone()) {
-                                // Snapshot known timestamps before reload so we only
-                                // ack messages that weren't visible when the chat opened.
-                                let known: HashSet<u64> = app.chat.as_ref()
-                                    .map(|c| c.messages.iter().map(|m| m.timestamp()).collect())
-                                    .unwrap_or_default();
+                        if matches!(app.view, View::ChatWindow)
+                            && let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone())
+                        {
+                            // Snapshot known timestamps before reload so we only
+                            // ack messages that weren't visible when the chat opened.
+                            let known: HashSet<u64> = app.chat.as_ref()
+                                .map(|c| c.messages.iter().map(|m| m.timestamp()).collect())
+                                .unwrap_or_default();
 
-                                if let Ok((msgs, reactions)) = signal::load_messages_and_reactions(&manager, &thread).await {
-                                    let receipt_state = signal::load_receipt_state(&manager, &thread).await.ok();
+                            if let Ok((msgs, reactions)) = signal::load_messages_and_reactions(&manager, &thread).await {
+                                let receipt_state = signal::load_receipt_state(&manager, &thread).await.ok();
 
-                                    let own_aci = app.own_aci;
-                                    let to_ack: Vec<u64> = msgs
-                                        .iter()
-                                        .filter(|m| !known.contains(&m.timestamp()))
-                                        .filter(|m| own_aci.map(|a| a != m.metadata.sender.raw_uuid()).unwrap_or(true))
-                                        .map(|m| m.timestamp())
-                                        .collect();
+                                let own_aci = app.own_aci;
+                                let to_ack: Vec<u64> = msgs
+                                    .iter()
+                                    .filter(|m| !known.contains(&m.timestamp()))
+                                    .filter(|m| own_aci.map(|a| a != m.metadata.sender.raw_uuid()).unwrap_or(true))
+                                    .map(|m| m.timestamp())
+                                    .collect();
 
-                                    if let Some(chat) = &mut app.chat {
-                                        chat.messages = msgs;
-                                        if let Some((del, rd)) = receipt_state {
-                                            chat.delivered = del;
-                                            chat.read = rd;
-                                        }
-                                        chat.reactions = reactions;
+                                if let Some(chat) = &mut app.chat {
+                                    chat.messages = msgs;
+                                    if let Some((del, rd)) = receipt_state {
+                                        chat.delivered = del;
+                                        chat.read = rd;
                                     }
+                                    chat.reactions = reactions;
+                                }
 
-                                    if !to_ack.is_empty() {
-                                        if let Err(e) = signal::send_read_receipt(&mut manager, &thread, to_ack).await {
-                                            tracing::warn!("send_read_receipt: {e}");
-                                        }
-                                    }
+                                if !to_ack.is_empty()
+                                    && let Err(e) = signal::send_read_receipt(&mut manager, &thread, to_ack).await
+                                {
+                                    tracing::warn!("send_read_receipt: {e}");
                                 }
                             }
                         }

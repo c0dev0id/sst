@@ -248,17 +248,17 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         msg_visual_starts.push(lines.len());
 
         // Timestamp separator when gap > 1 hour
-        if let Some(prev) = prev_ts {
-            if ts.saturating_sub(prev) > 3_600_000 {
-                let sep = format!("── {} ──", signal::fmt_ts_long(ts));
-                lines.push(Line::raw(""));
-                lines.push(Line::from(Span::styled(
-                    format!("{:^width$}", sep, width = area.width as usize),
-                    Style::default().fg(Color::DarkGray),
-                )));
-                lines.push(Line::raw(""));
-                prev_sender_id = None;
-            }
+        if let Some(prev) = prev_ts
+            && ts.saturating_sub(prev) > 3_600_000
+        {
+            let sep = format!("── {} ──", signal::fmt_ts_long(ts));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                format!("{:^width$}", sep, width = area.width as usize),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::raw(""));
+            prev_sender_id = None;
         }
         prev_ts = Some(ts);
 
@@ -348,22 +348,21 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Auto-scroll to keep the selected message in view with 1-line context.
     // scroll_row is the first visible line; higher chat.scroll = more scrolled up.
-    if let Some(sel_idx) = selected {
-        if let (Some(&vis_start), Some(&body_end)) =
+    if let Some(sel_idx) = selected
+        && let (Some(&vis_start), Some(&body_end)) =
             (msg_visual_starts.get(sel_idx), msg_body_ends.get(sel_idx))
-        {
-            let scroll_row = max_scroll.saturating_sub(chat.scroll);
-            if vis_start < scroll_row.saturating_add(1) {
-                // Selected region is above viewport — scroll up.
-                let target_row = vis_start.saturating_sub(1);
-                chat.scroll = max_scroll.saturating_sub(target_row);
-            } else if body_end + 1 >= scroll_row + height {
-                // Selected body end is below viewport — scroll down.
-                let target_row = (body_end + 2).saturating_sub(height);
-                chat.scroll = max_scroll.saturating_sub(target_row);
-            }
-            chat.scroll = chat.scroll.min(max_scroll);
+    {
+        let scroll_row = max_scroll.saturating_sub(chat.scroll);
+        if vis_start < scroll_row.saturating_add(1) {
+            // Selected region is above viewport — scroll up.
+            let target_row = vis_start.saturating_sub(1);
+            chat.scroll = max_scroll.saturating_sub(target_row);
+        } else if body_end + 1 >= scroll_row + height {
+            // Selected body end is below viewport — scroll down.
+            let target_row = (body_end + 2).saturating_sub(height);
+            chat.scroll = max_scroll.saturating_sub(target_row);
         }
+        chat.scroll = chat.scroll.min(max_scroll);
     }
 
     let scroll_row = total.saturating_sub(height).saturating_sub(chat.scroll);
@@ -501,27 +500,27 @@ fn chat_status_bar(app: &App) -> String {
 
     match &chat.mode {
         Mode::Normal => {
-            if let Some(att_idx) = chat.selected_attachment {
-                if let Some(att) = chat.staged_attachments.get(att_idx) {
-                    let pos = format!("{}/{}", att_idx + 1, chat.staged_attachments.len());
-                    return format!(
-                        "  Att [{}]  {}  {}  |  dd remove   Esc deselect   q back",
-                        pos, signal::kind_from_mime(att.mime), signal::fmt_attachment_size(att.size)
-                    );
-                }
+            if let Some(att_idx) = chat.selected_attachment
+                && let Some(att) = chat.staged_attachments.get(att_idx)
+            {
+                let pos = format!("{}/{}", att_idx + 1, chat.staged_attachments.len());
+                return format!(
+                    "  Att [{}]  {}  {}  |  dd remove   Esc deselect   q back",
+                    pos, signal::kind_from_mime(att.mime), signal::fmt_attachment_size(att.size)
+                );
             }
-            if let Some(sel_idx) = chat.selected_message {
-                if let Some(content) = chat.messages.get(sel_idx) {
-                    let sender_uuid = content.metadata.sender.raw_uuid();
-                    let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
-                    let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
-                    let ts = signal::fmt_ts_long(content.timestamp());
-                    let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
-                    return format!(
-                        "  [{}]  {}  ·  {}  |  r reply   e edit   d delete   : command   Esc deselect   q back",
-                        pos, sender, ts
-                    );
-                }
+            if let Some(sel_idx) = chat.selected_message
+                && let Some(content) = chat.messages.get(sel_idx)
+            {
+                let sender_uuid = content.metadata.sender.raw_uuid();
+                let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+                let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+                let ts = signal::fmt_ts_long(content.timestamp());
+                let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
+                return format!(
+                    "  [{}]  {}  ·  {}  |  r reply   e edit   d delete   : command   Esc deselect   q back",
+                    pos, sender, ts
+                );
             }
             "  j/k/↑↓ navigate   r reply   e edit   dd delete   : command   :upload <path>   PgUp/PgDn scroll   h/q/← back".to_string()
         }
@@ -529,16 +528,16 @@ fn chat_status_bar(app: &App) -> String {
             if chat.editing.is_some() {
                 return "  -- INSERT -- editing   Esc cancel   Enter send   Alt+Enter newline".to_string();
             }
-            if let Some(reply_idx) = chat.reply_to {
-                if let Some(content) = chat.messages.get(reply_idx) {
-                    let sender_uuid = content.metadata.sender.raw_uuid();
-                    let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
-                    let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
-                    return format!(
-                        "  -- INSERT -- replying to {}   Esc cancel   Enter send",
-                        sender
-                    );
-                }
+            if let Some(reply_idx) = chat.reply_to
+                && let Some(content) = chat.messages.get(reply_idx)
+            {
+                let sender_uuid = content.metadata.sender.raw_uuid();
+                let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+                let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+                return format!(
+                    "  -- INSERT -- replying to {}   Esc cancel   Enter send",
+                    sender
+                );
             }
             "  -- INSERT --   Esc normal   Enter send   Alt+Enter newline   Tab @mention".to_string()
         }

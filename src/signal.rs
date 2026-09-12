@@ -177,10 +177,10 @@ pub fn message_attachments(content: &Content) -> &[AttachmentPointer] {
 /// Derive a filename for a downloaded attachment.
 /// Uses the pointer's fileName field when present; falls back to `attachment_N.<ext>`.
 pub fn attachment_filename(pointer: &AttachmentPointer, idx: usize) -> String {
-    if let Some(name) = &pointer.file_name {
-        if !name.is_empty() {
-            return name.clone();
-        }
+    if let Some(name) = &pointer.file_name
+        && !name.is_empty()
+    {
+        return name.clone();
     }
     let ext = pointer.content_type.as_deref()
         .and_then(|ct| ct.split('/').nth(1))
@@ -602,10 +602,10 @@ pub fn message_body(content: &Content) -> String {
 }
 
 fn data_message_body(msg: &DataMessage) -> String {
-    if let Some(text) = &msg.body {
-        if !text.is_empty() {
-            return text.clone();
-        }
+    if let Some(text) = &msg.body
+        && !text.is_empty()
+    {
+        return text.clone();
     }
     if !msg.attachments.is_empty() {
         return "Attachment".to_string();
