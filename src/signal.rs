@@ -379,11 +379,13 @@ pub fn extract_update(content: &Content) -> Option<MessageUpdate> {
     // Receipts, typing messages, and other no-body events have no preview.
     // Bailing here keeps the thread's last_preview and last_ts intact so they
     // can't clear a visible preview or push the thread to the top.
-    let preview = extract_preview(content);
-    preview.as_ref()?;
+    let body = message_body(content);
+    if body.is_empty() {
+        return None;
+    }
     Some(MessageUpdate {
         thread,
-        preview,
+        preview: Some(body),
         ts: content.timestamp(),
     })
 }
@@ -568,18 +570,14 @@ async fn last_message<S: Store>(
             last_ts = ts; // most recent message timestamp, for sort order
         }
         if last_preview.is_none() {
-            last_preview = extract_preview(&content);
-            if last_preview.is_some() {
+            let body = message_body(&content);
+            if !body.is_empty() {
+                last_preview = Some(body);
                 break;
             }
         }
     }
     (last_preview, last_ts)
-}
-
-fn extract_preview(content: &Content) -> Option<String> {
-    let body = message_body(content);
-    if body.is_empty() { None } else { Some(body) }
 }
 
 pub fn message_body(content: &Content) -> String {
