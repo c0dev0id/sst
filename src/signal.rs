@@ -422,7 +422,7 @@ pub async fn list_threads<S: Store>(
         }
         seen.insert(uuid);
         let service_id = presage::libsignal_service::protocol::ServiceId::Aci(uuid.into());
-        let thread = Thread::Contact(service_id.clone());
+        let thread = Thread::Contact(service_id);
         let name = match manager.store().contact_by_id(&service_id).await {
             Ok(Some(contact)) => contact_display_name(&contact),
             _ => uuid.to_string(),
@@ -993,7 +993,7 @@ pub async fn send_read_receipt<S: Store>(
         return Ok(());
     }
     let service_id = match thread {
-        Thread::Contact(sid) => sid.clone(),
+        Thread::Contact(sid) => *sid,
         Thread::Group(_) => return Ok(()),
     };
     let ts = now_millis()?;
@@ -1059,7 +1059,7 @@ async fn dispatch_send_body<S: Store>(
     match thread {
         Thread::Contact(service_id) => {
             manager
-                .send_message(service_id.clone(), body, ts)
+                .send_message(*service_id, body, ts)
                 .await
                 .context("failed to send message")?;
         }
