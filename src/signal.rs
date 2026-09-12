@@ -39,7 +39,7 @@ pub struct ThreadEntry {
 
 pub struct MessageUpdate {
     pub thread: Thread,
-    pub preview: Option<String>,
+    pub preview: String,
     pub ts: u64,
 }
 
@@ -385,7 +385,7 @@ pub fn extract_update(content: &Content) -> Option<MessageUpdate> {
     }
     Some(MessageUpdate {
         thread,
-        preview: Some(body),
+        preview: body,
         ts: content.timestamp(),
     })
 }

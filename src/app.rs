@@ -565,7 +565,7 @@ impl App {
         let Some(update) = signal::extract_update(&boxed) else { return };
 
         if let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) {
-            entry.last_preview = update.preview.clone();
+            entry.last_preview = Some(update.preview);
             if update.ts > entry.last_ts {
                 entry.last_ts = update.ts;
                 entry.unread = true;
@@ -578,7 +578,7 @@ impl App {
             self.threads.push(ThreadEntry {
                 thread: update.thread.clone(),
                 name,
-                last_preview: update.preview.clone(),
+                last_preview: Some(update.preview),
                 last_ts: update.ts,
                 unread: true,
             });
