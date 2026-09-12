@@ -126,7 +126,9 @@ See `README.md` for the full UX specification. High-level:
 - QR-code-based device linking via presage
 - Chat list with 1:1 and group chat support (groups always have a title from Signal)
 - Chat window with inline reactions, quote-replies, and typing notifications
-- `@mention` autocomplete
-- Slash command autocomplete (`/reply`, `/react`)
-- Message selection mode (Shift+arrow keys) as prerequisite for reply/react
-- Async message receiving via presage's `Stream<Item = Received>`
+- `@mention` autocomplete and path Tab-completion in colon commands
+- Vim-modal chat window: Normal/Insert/Command modes; `:react`, `:upload`, `:download`, `:download-all`, `:quit` colon commands; `dd` delete-for-everyone
+- `j`/`k` message selection as prerequisite for reply/edit/react/delete
+- Attachment upload/download pipeline with staging, retry on per-file failure, and atomic writes
+- Contact browser (`n`) for starting chats with contacts that have no message history
+- Async message receiving via presage's `Stream<Item = Received>`, with automatic reconnect

@@ -301,7 +301,7 @@ async fn drain_backlog<S: Store>(
 
 /// Drain the pending queue (discarding message content), request a fresh
 /// contact list from the primary device, and wait for it to arrive.
-/// Used for --contact-list mode; much faster than a full sync.
+/// Much faster than a full sync when only the contact list is needed.
 pub async fn sync_contacts<S: Store>(
     manager: &mut Manager<S, Registered>,
     state: &mut SyncState,
@@ -344,7 +344,7 @@ pub async fn sync_contacts<S: Store>(
     Ok(())
 }
 
-/// Drain the message queue and drop the stream. Used for --list mode.
+/// Drain the pending message queue to force a resync from the primary device.
 pub async fn sync<S: Store>(
     manager: &mut Manager<S, Registered>,
     state: &mut SyncState,
@@ -692,9 +692,6 @@ pub async fn load_messages<S: Store>(
 }
 
 
-/// Single-pass load: splits the thread's message store into displayable messages
-/// and a reduced ReactionMap. Avoids two separate full scans when both are needed.
-///
 /// Extract (target_sent_timestamp, new_body) from an EditMessage or a SyncMessage
 /// wrapping an edit (sent by us on another device). Returns None for all other content.
 fn extract_edit(content: &Content) -> Option<(u64, String)> {
@@ -733,6 +730,9 @@ fn apply_edit_body(content: &mut Content, new_body: &str) {
     }
 }
 
+/// Single-pass load: splits the thread's message store into displayable messages
+/// and a reduced ReactionMap. Avoids two separate full scans when both are needed.
+///
 /// Reaction toggle semantics: events are processed in chronological order (ASC).
 /// The same (sender, emoji, target_ts) triple with remove=true undoes a prior add.
 pub async fn load_messages_and_reactions<S: Store>(
