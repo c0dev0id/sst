@@ -545,8 +545,7 @@ fn contact_display_name(contact: &presage::model::contacts::Contact) -> String {
     contact
         .phone_number
         .as_ref()
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| contact.uuid.to_string())
+        .map_or_else(|| contact.uuid.to_string(), ToString::to_string)
 }
 
 // On-disk format for both known contacts (16-byte UUIDs) and known group
@@ -1029,8 +1028,7 @@ async fn dispatch_send_body<S: Store>(
         let revision = manager.store().group(*master_key).await
             .ok()
             .flatten()
-            .map(|g| g.revision)
-            .unwrap_or(0);
+            .map_or(0, |g| g.revision);
         let ctx = GroupContextV2 {
             master_key: Some(master_key.to_vec()),
             revision: Some(revision),

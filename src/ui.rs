@@ -144,7 +144,7 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
     } else {
         2
     };
-    let att_height = if app.chat.as_ref().map(|c| !c.staged_attachments.is_empty()).unwrap_or(false) {
+    let att_height = if app.chat.as_ref().is_some_and(|c| !c.staged_attachments.is_empty()) {
         1u16
     } else {
         0u16
@@ -193,7 +193,7 @@ fn draw_attachment_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_chat_header(f: &mut Frame, app: &App, area: Rect) {
-    let name = app.chat.as_ref().map(|c| c.thread_name.as_str()).unwrap_or("");
+    let name = app.chat.as_ref().map_or("", |c| c.thread_name.as_str());
     let header = Paragraph::new(format!(" {}", name))
         .style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_widget(header, area);
@@ -233,7 +233,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     for (msg_idx, content) in chat.messages.iter().enumerate() {
         let ts = content.timestamp();
         let sender_uuid = content.metadata.sender.raw_uuid();
-        let is_own = own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+        let is_own = own_aci.is_some_and(|a| a == sender_uuid);
         let is_selected = selected == Some(msg_idx);
 
         let sender_label = if is_own {
@@ -415,7 +415,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             let before_cursor = &input[..cursor.min(input.len())];
             let cursor_parts: Vec<&str> = before_cursor.split('\n').collect();
             let cursor_line = cursor_parts.len().saturating_sub(1);
-            let cursor_col = cursor_parts.last().map(|l| l.chars().count()).unwrap_or(0);
+            let cursor_col = cursor_parts.last().map_or(0, |l| l.chars().count());
 
             let mut text_lines: Vec<Line> = Vec::new();
             let mut visual_row = 0usize;
@@ -449,8 +449,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                             let chars: Vec<char> = sub_text.chars().collect();
                             let before: String = chars[..col_in_sub.min(chars.len())].iter().collect();
                             let cursor_char = chars.get(col_in_sub)
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| " ".to_string());
+                                .map_or_else(|| " ".to_string(), ToString::to_string);
                             let after: String = chars[col_in_sub.saturating_add(1).min(chars.len())..]
                                 .iter()
                                 .collect();
@@ -517,7 +516,7 @@ fn chat_status_bar(app: &App) -> String {
                 && let Some(content) = chat.messages.get(sel_idx)
             {
                 let sender_uuid = content.metadata.sender.raw_uuid();
-                let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+                let is_own = app.own_aci.is_some_and(|a| a == sender_uuid);
                 let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
                 let ts = signal::fmt_ts_long(content.timestamp());
                 let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
@@ -536,7 +535,7 @@ fn chat_status_bar(app: &App) -> String {
                 && let Some(content) = chat.messages.get(reply_idx)
             {
                 let sender_uuid = content.metadata.sender.raw_uuid();
-                let is_own = app.own_aci.map(|a| a == sender_uuid).unwrap_or(false);
+                let is_own = app.own_aci.is_some_and(|a| a == sender_uuid);
                 let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
                 return format!(
                     "  -- INSERT -- replying to {}   Esc cancel   Enter send",

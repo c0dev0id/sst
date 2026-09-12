@@ -283,7 +283,7 @@ async fn run<S: Store>(
                 match &entry.thread {
                     Thread::Contact(sid) => {
                         let uuid = sid.raw_uuid();
-                        let name = resolved.get(&uuid).map(String::as_str).unwrap_or(&entry.name);
+                        let name = resolved.get(&uuid).map_or(entry.name.as_str(), String::as_str);
                         match format {
                             Format::Text => println!("{} {}", uuid, name),
                             Format::Json => println!("{}", serde_json::json!({
@@ -370,13 +370,12 @@ async fn run<S: Store>(
 
         Some(Cmd::Send { recipient, text, attach }) => {
             let thread = parse_thread_id(&recipient)?;
-            let text = match text {
-                Some(t) => t,
-                None => {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                    buf.trim_end_matches(['\n', '\r']).to_string()
-                }
+            let text = if let Some(t) = text {
+                t
+            } else {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                buf.trim_end_matches(['\n', '\r']).to_string()
             };
             if text.is_empty() && attach.is_empty() {
                 anyhow::bail!("nothing to send (no text and no attachments)");
@@ -439,8 +438,7 @@ fn format_one(format: &Format, ts_ms: u64, sender_uuid: Uuid, sender_name: &str,
             // Signal timestamps (unix ms) wrap i64 only past year ~292 billion.
             #[allow(clippy::cast_possible_wrap)]
             let ts = DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
-                .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
-                .unwrap_or_else(|| ts_ms.to_string());
+                .map_or_else(|| ts_ms.to_string(), |dt| dt.with_timezone(&Utc).to_rfc3339());
             serde_json::json!({
                 "timestamp":   ts,
                 "sender_uuid": sender_uuid.to_string(),

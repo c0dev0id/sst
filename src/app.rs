@@ -176,7 +176,7 @@ impl App {
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let next = self.selected().map(|i| i + 1).unwrap_or(0);
+                let next = self.selected().map_or(0, |i| i + 1);
                 self.select(next);
                 None
             }
@@ -186,7 +186,7 @@ impl App {
                 None
             }
             KeyCode::PageDown => {
-                let next = self.selected().map(|i| i + 10).unwrap_or(0);
+                let next = self.selected().map_or(0, |i| i + 10);
                 self.select(next);
                 None
             }
@@ -277,8 +277,7 @@ impl App {
                         if let Some(sel_idx) = chat.selected_message {
                             if let Some(content) = chat.messages.get(sel_idx) {
                                 let is_own = own_aci
-                                    .map(|a| a == content.metadata.sender.raw_uuid())
-                                    .unwrap_or(false);
+                                    .is_some_and(|a| a == content.metadata.sender.raw_uuid());
                                 if is_own {
                                     let body = signal::message_body(content).to_string();
                                     let ts = content.timestamp();
@@ -609,8 +608,7 @@ fn parse_colon_cmd(input: &str) -> Option<ColonCmd<'_>> {
     let s = input.trim().strip_prefix(':')?;
     let (name, arg) = s
         .split_once(' ')
-        .map(|(n, a)| (n, a.trim()))
-        .unwrap_or((s, ""));
+        .map_or((s, ""), |(n, a)| (n, a.trim()));
     match name {
         "quit"         => Some(ColonCmd::Quit),
         "react"        => Some(ColonCmd::React(arg)),
@@ -763,12 +761,12 @@ fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
 
 fn cursor_left(input: &str, cursor: usize) -> usize {
     if cursor == 0 { return 0; }
-    input[..cursor].char_indices().next_back().map(|(i, _)| i).unwrap_or(0)
+    input[..cursor].char_indices().next_back().map_or(0, |(i, _)| i)
 }
 
 fn cursor_right(input: &str, cursor: usize) -> usize {
     if cursor >= input.len() { return input.len(); }
-    cursor + input[cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(0)
+    cursor + input[cursor..].chars().next().map_or(0, |c| c.len_utf8())
 }
 
 // Returns (line_index, visual_col) for a byte cursor position.
@@ -776,7 +774,7 @@ fn cursor_line_col(input: &str, cursor: usize) -> (usize, usize) {
     let before = &input[..cursor.min(input.len())];
     let parts: Vec<&str> = before.split('\n').collect();
     let line = parts.len().saturating_sub(1);
-    let col = parts.last().map(|l| l.chars().count()).unwrap_or(0);
+    let col = parts.last().map_or(0, |l| l.chars().count());
     (line, col)
 }
 
@@ -793,8 +791,7 @@ fn cursor_up(input: &str, cursor: usize) -> usize {
     let byte_in_line = prev_line
         .char_indices()
         .nth(col_clamped)
-        .map(|(b, _)| b)
-        .unwrap_or(prev_line.len());
+        .map_or(prev_line.len(), |(b, _)| b);
     line_byte_start(input, line - 1) + byte_in_line
 }
 
@@ -807,8 +804,7 @@ fn cursor_down(input: &str, cursor: usize) -> usize {
     let byte_in_line = next_line
         .char_indices()
         .nth(col_clamped)
-        .map(|(b, _)| b)
-        .unwrap_or(next_line.len());
+        .map_or(next_line.len(), |(b, _)| b);
     line_byte_start(input, line + 1) + byte_in_line
 }
 
@@ -864,7 +860,7 @@ async fn execute_cmd<S: Store>(
             let own_aci = app.own_aci;
             let to_ack: Vec<u64> = messages
                 .iter()
-                .filter(|m| own_aci.map(|a| a != m.metadata.sender.raw_uuid()).unwrap_or(true))
+                .filter(|m| own_aci.is_none_or(|a| a != m.metadata.sender.raw_uuid()))
                 .map(|m| m.timestamp())
                 .collect();
 
@@ -1042,14 +1038,11 @@ async fn execute_cmd<S: Store>(
                             Some(c) => c,
                             None => return Ok(()),
                         };
-                        let idx = match chat.selected_message {
-                            Some(i) => i,
-                            None => {
-                                if let Some(c) = &mut app.chat {
-                                    c.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
-                                }
-                                return Ok(());
+                        let Some(idx) = chat.selected_message else {
+                            if let Some(c) = &mut app.chat {
+                                c.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
                             }
+                            return Ok(());
                         };
                         let atts = chat.messages.get(idx)
                             .map(|m| signal::message_attachments(m).to_vec())
@@ -1165,8 +1158,7 @@ async fn execute_cmd<S: Store>(
                         None => return Ok(()),
                     };
                     let own = app.own_aci
-                        .map(|a| a == msg.metadata.sender.raw_uuid())
-                        .unwrap_or(false);
+                        .is_some_and(|a| a == msg.metadata.sender.raw_uuid());
                     (chat.thread.clone(), msg.timestamp(), idx, own)
                 }
                 None => return Ok(()),
@@ -1267,7 +1259,7 @@ pub async fn run<S: Store>(
                                 let to_ack: Vec<u64> = msgs
                                     .iter()
                                     .filter(|m| !known.contains(&m.timestamp()))
-                                    .filter(|m| own_aci.map(|a| a != m.metadata.sender.raw_uuid()).unwrap_or(true))
+                                    .filter(|m| own_aci.is_none_or(|a| a != m.metadata.sender.raw_uuid()))
                                     .map(|m| m.timestamp())
                                     .collect();
 
