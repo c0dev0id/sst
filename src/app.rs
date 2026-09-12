@@ -29,6 +29,14 @@ pub enum Mode {
     Command(String),
 }
 
+pub struct LoadedChat {
+    pub messages: Vec<Content>,
+    pub delivered: HashSet<u64>,
+    pub read: HashSet<u64>,
+    pub reactions: ReactionMap,
+    pub sender_names: HashMap<Uuid, String>,
+}
+
 pub struct ChatState {
     pub thread: Thread,
     pub thread_name: String,
@@ -94,34 +102,25 @@ impl App {
         }
     }
 
-    pub fn open_chat(
-        &mut self,
-        thread: Thread,
-        thread_name: String,
-        messages: Vec<Content>,
-        delivered: HashSet<u64>,
-        read: HashSet<u64>,
-        reactions: ReactionMap,
-        sender_names: HashMap<Uuid, String>,
-    ) {
+    pub fn open_chat(&mut self, thread: Thread, thread_name: String, data: LoadedChat) {
         self.chat = Some(ChatState {
             thread,
             thread_name,
-            messages,
+            messages: data.messages,
             scroll: 0,
             viewport_height: 0,
             viewport_top_msg: 0,
             input: String::new(),
             cursor: 0,
             selected_message: None,
-            delivered,
-            read,
+            delivered: data.delivered,
+            read: data.read,
             autocomplete_hint: None,
-            reactions,
+            reactions: data.reactions,
             mode: Mode::Normal,
             reply_to: None,
             editing: None,
-            sender_names,
+            sender_names: data.sender_names,
             pending_d: false,
             staged_attachments: Vec::new(),
             selected_attachment: None,
@@ -858,7 +857,13 @@ async fn execute_cmd<S: Store>(
                 .map(|m| m.timestamp())
                 .collect();
 
-            app.open_chat(thread.clone(), name, messages, delivered, read, reactions, sender_names);
+            app.open_chat(thread.clone(), name, LoadedChat {
+                messages,
+                delivered,
+                read,
+                reactions,
+                sender_names,
+            });
 
             if let Err(e) = signal::send_read_receipt(manager, &thread, to_ack).await {
                 tracing::warn!("send_read_receipt: {e}");
