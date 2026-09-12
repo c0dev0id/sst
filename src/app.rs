@@ -404,16 +404,12 @@ impl App {
                             return Some(AppCmd::SendMessage);
                         }
                     }
-                    KeyCode::Backspace => {
-                        if chat.cursor > 0 {
-                            let new_cursor = cursor_left(&chat.input, chat.cursor);
-                            chat.input.remove(new_cursor);
-                            chat.cursor = new_cursor;
-                        }
-                    }
                     // Ctrl+H is the terminal-conventional backspace (0x08). Some
                     // terminal emulators (including OpenBSD's) send it for Shift+Backspace.
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Backspace | KeyCode::Char('h')
+                        if key.code == KeyCode::Backspace
+                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         if chat.cursor > 0 {
                             let new_cursor = cursor_left(&chat.input, chat.cursor);
                             chat.input.remove(new_cursor);
