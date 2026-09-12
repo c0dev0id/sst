@@ -153,25 +153,27 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         Some(Cmd::Send { .. }) | Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. })
     );
 
-    if needs_lock {
+    // lock_holder must live at the same scope as _lock_guard so the guard's
+    // borrow into it stays valid for the whole run_inner call.
+    let mut lock_holder: fd_lock::RwLock<std::fs::File>;
+    let _lock_guard = if needs_lock {
         let lock_file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
             .open(data_dir.join("sst.lock"))
             .context("failed to open lock file")?;
-        let mut lock_holder = fd_lock::RwLock::new(lock_file);
-        // _lock_guard stays alive for the entire body below (until this block ends).
-        let _lock_guard = lock_holder.try_write().map_err(|_| {
+        lock_holder = fd_lock::RwLock::new(lock_file);
+        Some(lock_holder.try_write().map_err(|_| {
             anyhow::anyhow!(
                 "another sst instance is already running\n\
                  (only one instance may use the Signal session at a time)"
             )
-        })?;
-        run_inner(args.cmd, db_path, data_dir).await
+        })?)
     } else {
-        run_inner(args.cmd, db_path, data_dir).await
-    }
+        None
+    };
+    run_inner(args.cmd, db_path, data_dir).await
 }
 
 async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
