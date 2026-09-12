@@ -806,13 +806,7 @@ fn cursor_down(input: &str, cursor: usize) -> usize {
 
 async fn next_or_pending(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>>>>) -> Option<Received> {
     match stream {
-        Some(s) => {
-            let v = s.next().await;
-            if v.is_none() {
-                *stream = None;
-            }
-            v
-        }
+        Some(s) => s.next().await,
         None => std::future::pending().await,
     }
 }
@@ -1278,6 +1272,9 @@ pub async fn run<S: Store>(
                             }
                         }
                     } else {
+                        // Drop the dead stream so the next iteration's next_or_pending
+                        // sleeps on future::pending() rather than re-polling a closed stream.
+                        signal_stream = None;
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         match manager.receive_messages().await {
                             Ok(s) => signal_stream = Some(Box::pin(s)),
