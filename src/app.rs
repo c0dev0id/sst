@@ -230,16 +230,9 @@ impl App {
             chat.pending_d = false;
         }
 
-        // Snapshot mode discriminant to avoid holding a borrow into chat.mode across mutations.
-        let mode_disc = match &chat.mode {
-            Mode::Normal => 0u8,
-            Mode::Insert => 1,
-            Mode::Command(_) => 2,
-        };
-
         // PgUp/PgDn scroll the message viewport in Normal and Insert modes;
         // Command mode ignores them so typing a command isn't interrupted.
-        if mode_disc != 2 {
+        if !matches!(chat.mode, Mode::Command(_)) {
             match key.code {
                 KeyCode::PageUp => {
                     let h = chat.viewport_height as usize;
@@ -255,8 +248,8 @@ impl App {
             }
         }
 
-        match mode_disc {
-            0 => { // Normal mode
+        match chat.mode {
+            Mode::Normal => { // Normal mode
                 match key.code {
                     KeyCode::Esc => {
                         if chat.selected_message.is_some() || chat.selected_attachment.is_some() {
@@ -376,7 +369,7 @@ impl App {
                     _ => {}
                 }
             }
-            1 => { // Insert mode
+            Mode::Insert => { // Insert mode
                 match key.code {
                     KeyCode::Esc => {
                         chat.mode = Mode::Normal;
@@ -440,7 +433,7 @@ impl App {
                     _ => {}
                 }
             }
-            2 => { // Command mode — clone command text before any mutation
+            Mode::Command(_) => { // Command mode — clone command text before any mutation
                 let cmd_so_far = if let Mode::Command(s) = &chat.mode {
                     s.clone()
                 } else {
@@ -495,7 +488,6 @@ impl App {
                     _ => {}
                 }
             }
-            _ => {}
         }
         None
     }
