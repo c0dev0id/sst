@@ -11,6 +11,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
+use presage::libsignal_service::protocol::ServiceId;
 use presage::libsignal_service::proto::{AttachmentPointer, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
 use presage::libsignal_service::sender::AttachmentSpec;
 
@@ -400,7 +401,7 @@ pub async fn list_threads<S: Store>(
     for result in manager.store().contacts().await? {
         let contact = result?;
         seen.insert(contact.uuid);
-        let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
+        let service_id = ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
         let name = if own_aci == Some(contact.uuid) {
             "Note to Self".to_string()
@@ -419,7 +420,7 @@ pub async fn list_threads<S: Store>(
             continue;
         }
         seen.insert(uuid);
-        let service_id = presage::libsignal_service::protocol::ServiceId::Aci(uuid.into());
+        let service_id = ServiceId::Aci(uuid.into());
         let thread = Thread::Contact(service_id);
         let name = match manager.store().contact_by_id(&service_id).await {
             Ok(Some(contact)) => contact_display_name(&contact),
@@ -458,7 +459,7 @@ pub async fn list_all_contacts<S: Store>(
         if own_aci == Some(contact.uuid) {
             continue;
         }
-        let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
+        let service_id = ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
         let name = contact_display_name(&contact);
         contact_entries.push(ThreadEntry { thread, name, last_preview: None, last_ts: 0, unread: false });
@@ -505,7 +506,7 @@ pub async fn fetch_missing_profiles<S: Store>(
 
     let mut resolved = HashMap::new();
     for contact in nameless {
-        let service_id = presage::libsignal_service::protocol::ServiceId::Aci(contact.uuid.into());
+        let service_id = ServiceId::Aci(contact.uuid.into());
         let Ok(Some(key)) = manager.store().profile_key(&service_id).await else {
             continue;
         };
@@ -623,7 +624,7 @@ pub async fn lookup_contact_name<S: Store>(
     manager: &Manager<S, Registered>,
     uuid: Uuid,
 ) -> String {
-    let service_id = presage::libsignal_service::protocol::ServiceId::Aci(uuid.into());
+    let service_id = ServiceId::Aci(uuid.into());
     match manager.store().contact_by_id(&service_id).await {
         Ok(Some(contact)) => contact_display_name(&contact),
         _ => uuid.to_string(),
@@ -646,7 +647,7 @@ pub async fn load_sender_names<S: Store>(
                 return map;
             };
             for member in group.members {
-                let uuid = presage::libsignal_service::protocol::ServiceId::Aci(member.aci)
+                let uuid = ServiceId::Aci(member.aci)
                     .raw_uuid();
                 if own_aci == Some(uuid) {
                     continue;
