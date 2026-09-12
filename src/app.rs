@@ -982,7 +982,7 @@ async fn execute_cmd<S: Store>(
                 Some(ColonCmd::Quit) => {
                     app.quit = true;
                 }
-                Some(ColonCmd::React(arg)) if arg.is_empty() => {
+                Some(ColonCmd::React("")) => {
                     let hint = if let Some((target_ts, _, _)) = quote_info {
                         if let Some(chat) = &app.chat {
                             reaction_hint(&chat.reactions, target_ts)
