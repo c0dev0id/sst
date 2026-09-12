@@ -404,11 +404,13 @@ async fn print_messages<S: Store>(
     let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
     for msg in messages {
         let uuid = msg.metadata.sender.raw_uuid();
-        if !names.contains_key(&uuid) {
-            let name = signal::lookup_contact_name(manager, uuid).await;
-            names.insert(uuid, name);
-        }
-        let sender_name = names.get(&uuid).map(String::as_str).unwrap_or("");
+        let sender_name: &str = match names.entry(uuid) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let name = signal::lookup_contact_name(manager, uuid).await;
+                e.insert(name)
+            }
+        };
         let body = signal::message_body(msg);
         println!("{}", format_one(format, msg.timestamp(), uuid, sender_name, &body));
     }
