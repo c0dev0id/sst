@@ -151,7 +151,7 @@ impl App {
             }
             Mode::Command(s) => {
                 // Command line is single-line; collapse newlines to spaces.
-                let single = text.replace("\r\n", " ").replace('\r', " ").replace('\n', " ");
+                let single = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
                 s.push_str(single.trim_end());
             }
             Mode::Normal => {}
