@@ -457,37 +457,19 @@ impl App {
                         }
                     }
                     KeyCode::Tab => {
-                        if let Some(partial) = cmd_so_far.strip_prefix("upload ") {
-                            apply_path_completion("upload", partial, chat);
-                        } else if let Some(partial) = cmd_so_far.strip_prefix("download-all ") {
-                            apply_path_completion("download-all", partial, chat);
-                        } else if let Some(partial) = cmd_so_far.strip_prefix("download ") {
-                            apply_path_completion("download", partial, chat);
-                        } else if let Some(partial) = cmd_so_far.strip_prefix("react ") {
-                            let partial = partial.trim_start();
-                            if !partial.is_empty() && partial.is_ascii() {
-                                let partial_lower = partial.to_lowercase();
-                                let mut matches: Vec<&str> = emojis::iter()
-                                    .flat_map(|e| e.shortcodes())
-                                    .filter(|s| s.starts_with(partial_lower.as_str()))
-                                    .collect();
-                                matches.sort_unstable();
-                                match matches.len() {
-                                    0 => {}
-                                    1 => {
-                                        chat.mode = Mode::Command(format!("react {}", matches[0]));
-                                        chat.autocomplete_hint = None;
-                                    }
-                                    _ => {
-                                        chat.autocomplete_hint = Some(matches.join("  "));
-                                    }
-                                }
+                        if let Some((name, arg)) = cmd_so_far.split_once(' ') {
+                            // Argument completion: dispatch on the registered ArgKind.
+                            match COLON_COMMANDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k) {
+                                Some(ArgKind::Path)  => apply_path_completion(name, arg, chat),
+                                Some(ArgKind::Emoji) => apply_emoji_completion(name, arg, chat),
+                                Some(ArgKind::None) | None => {}
                             }
-                        } else if !cmd_so_far.contains(' ') {
+                        } else {
+                            // Base-name completion: no argument typed yet.
                             let partial = cmd_so_far.to_lowercase();
                             let matches: Vec<&str> = COLON_COMMANDS
                                 .iter()
-                                .copied()
+                                .map(|(n, _)| *n)
                                 .filter(|c| c.starts_with(partial.as_str()))
                                 .collect();
                             if matches.len() == 1 {
@@ -607,7 +589,21 @@ impl App {
 
 // ── Colon command registry ────────────────────────────────────────────────────
 
-const COLON_COMMANDS: &[&str] = &["download", "download-all", "quit", "react", "upload"];
+#[derive(Clone, Copy)]
+enum ArgKind {
+    None,  // e.g. :quit
+    Path,  // :upload, :download, :download-all
+    Emoji, // :react
+}
+
+const COLON_COMMANDS: &[(&str, ArgKind)] = &[
+    ("download",     ArgKind::Path),
+    ("download-all", ArgKind::Path),
+    ("quit",         ArgKind::None),
+    ("react",        ArgKind::Emoji),
+    ("upload",       ArgKind::Path),
+];
+
 const HINT_SELECT_FIRST: &str = "select a message first (j/k)";
 
 enum ColonCmd<'a> {
@@ -715,6 +711,29 @@ fn complete_path(partial: &str) -> Vec<String> {
         .collect();
     results.sort();
     results
+}
+
+fn apply_emoji_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
+    let partial = partial.trim_start();
+    if partial.is_empty() || !partial.is_ascii() {
+        return;
+    }
+    let partial_lower = partial.to_lowercase();
+    let mut matches: Vec<&str> = emojis::iter()
+        .flat_map(|e| e.shortcodes())
+        .filter(|s| s.starts_with(partial_lower.as_str()))
+        .collect();
+    matches.sort_unstable();
+    match matches.len() {
+        0 => {}
+        1 => {
+            chat.mode = Mode::Command(format!("{} {}", cmd_name, matches[0]));
+            chat.autocomplete_hint = None;
+        }
+        _ => {
+            chat.autocomplete_hint = Some(matches.join("  "));
+        }
+    }
 }
 
 fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
