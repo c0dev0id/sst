@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use anyhow::Context as _;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use futures::{Stream, StreamExt};
 use presage::Manager;
 use presage::manager::Registered;
@@ -999,7 +999,7 @@ pub async fn send_read_receipt<S: Store>(
 
 // u128 → u64 truncation only matters past year ~584 million.
 #[allow(clippy::cast_possible_truncation)]
-fn now_millis() -> anyhow::Result<u64> {
+pub(crate) fn now_millis() -> anyhow::Result<u64> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("system time error")?
@@ -1065,15 +1065,18 @@ async fn dispatch_send_body<S: Store>(
 
 // Signal timestamps (unix ms) wrap i64 only past year ~292 billion.
 #[allow(clippy::cast_possible_wrap)]
-pub(crate) fn fmt_ts_short(ts_ms: u64) -> String {
+pub(crate) fn ts_to_datetime(ts_ms: u64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
+}
+
+pub(crate) fn fmt_ts_short(ts_ms: u64) -> String {
+    ts_to_datetime(ts_ms)
         .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
         .unwrap_or_default()
 }
 
-#[allow(clippy::cast_possible_wrap)]
 pub(crate) fn fmt_ts_long(ts_ms: u64) -> String {
-    DateTime::from_timestamp((ts_ms / 1000) as i64, 0)
+    ts_to_datetime(ts_ms)
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
 }
