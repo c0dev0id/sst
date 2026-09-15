@@ -102,6 +102,18 @@ Filename collisions are resolved by `unique_path()` which inserts `_N` before th
 
 `selected_message` and `selected_attachment` are mutually exclusive in `ChatState`. Navigation in Normal mode forms a circular ring: oldest message → … → newest message → first staged file → … → last staged file → oldest message (k is fully symmetric). This avoids two separate navigation contexts and lets the user move naturally from reviewing messages to checking/removing queued files.
 
+### Linking feedback and relink-needed detection
+
+`Manager::link_secondary_device` sends the provisioning URL over a `oneshot` channel and then awaits the primary device's confirmation. If the user never scans, the future waits forever. Wrapping the whole `future::join(link_fut, qr_fut)` in `tokio::time::timeout(300s, ...)` gives us a clean timeout window and lets `link_device` return distinct outcomes:
+
+- `Ok(manager)` → print "Linking successful."
+- `Err(e)` → print "device linking failed: {e}" (anyhow default)
+- `Elapsed` → print "Linking timed out after N seconds…"
+
+Presage's error type has a `RelinkNecessary` variant, but it's only emitted from `manager/registered.rs:1921` for a PNI registration mismatch — **not** for the common HTTP 403 on the WebSocket upgrade that happens when the device has been unlinked from the primary. That case bubbles up as `presage::Error::ServiceError(libsignal_service::ServiceError::WsError(reqwest_websocket::Error::Handshake(HandshakeError::UnexpectedStatusCode(403))))` and displays as "libsignal-service error: Websocket error: websocket upgrade failed" — accurate but unhelpful.
+
+`signal::relink_hint(&anyhow::Error)` walks `err.chain()` and matches "403", "Forbidden", "Authorization failed", "Unauthorized", or "please relink" against each level's `Display`. Top-level dispatch in `async_main` swaps in a friendlier message + `exit(1)` when the hint fires. String matching over downcasting keeps `libsignal_service` types out of `main.rs`.
+
 ### CLI subcommand design
 
 The old CLI used ad-hoc boolean flags (`--list`, `--send`, `--read-stream`, etc.) which had inconsistent naming and no machine-readable output story. The redesign uses clap subcommands:

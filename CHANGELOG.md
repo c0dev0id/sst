@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `sst link` now prints "Linking successful. Device provisioned." on success, "Linking timed out…" after 5 minutes of no QR scan, and clearly labels underlying failures. Previously the QR appeared and the command exited silently on both success and timeout, giving no feedback either way.
+- Signal auth failures (HTTP 403 on the WebSocket upgrade — typical after the device is unlinked from the primary) now surface as: "Signal rejected this device. Run `sst link` to re-provision." with the underlying error printed below. Previously the raw "libsignal-service error: Websocket error: websocket upgrade failed" was shown, which was not actionable.
 - CLI redesigned from ad-hoc flags to a consistent subcommand interface: `sst link`, `sst chats`, `sst contacts`, `sst print <uuid>`, `sst print-last [-n N] <uuid>`, `sst watch <uuid>`, `sst send <uuid> [text] [--attach <path>]…`. Running `sst` with no subcommand opens the TUI as before. All subcommands accept `--format=text|json` for machine-readable output. A global `--db <path>` flag overrides the default store location. `sst help` and `sst help <subcommand>` print usage information.
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
