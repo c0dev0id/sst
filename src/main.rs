@@ -173,7 +173,17 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     } else {
         None
     };
-    run_inner(args.cmd, db_path, data_dir).await
+    match run_inner(args.cmd, db_path, data_dir).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(hint) = signal::relink_hint(&e) {
+                eprintln!("{hint}");
+                eprintln!("(underlying error: {e})");
+                std::process::exit(1);
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
@@ -247,7 +257,10 @@ async fn run<S: Store>(
             app::run(threads, state.own_aci, state.data_dir, manager, stream).await
         }
 
-        Some(Cmd::Link) => Ok(()),
+        Some(Cmd::Link) => {
+            eprintln!("Linking successful. Device provisioned.");
+            Ok(())
+        }
 
         Some(Cmd::Chats { format }) => {
             signal::sync(&mut manager, &mut state).await?;
@@ -473,30 +486,38 @@ fn parse_thread_id(s: &str) -> anyhow::Result<Thread> {
 
 // ── Device linking ────────────────────────────────────────────────────────────
 
+const LINK_TIMEOUT_SECS: u64 = 300;
+
 async fn link_device<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {
     let (tx, rx) = oneshot::channel();
 
-    let (manager_result, _) = future::join(
-        Manager::link_secondary_device(
-            store,
-            SignalServers::Production,
-            "sst".to_string(),
-            tx,
-        ),
-        async move {
-            match rx.await {
-                Ok(url) => {
-                    eprintln!("Scan this QR code with your Signal app:");
-                    qr2term::print_qr(url.to_string()).unwrap_or_else(|e| {
-                        eprintln!("QR render failed: {e}");
-                        eprintln!("URL: {url}");
-                    });
-                }
-                Err(e) => error!("provisioning cancelled: {e}"),
+    let link_fut = Manager::link_secondary_device(
+        store,
+        SignalServers::Production,
+        "sst".to_string(),
+        tx,
+    );
+    let qr_fut = async move {
+        match rx.await {
+            Ok(url) => {
+                eprintln!("Scan this QR code with your Signal app (Settings → Linked devices):");
+                qr2term::print_qr(url.to_string()).unwrap_or_else(|e| {
+                    eprintln!("QR render failed: {e}");
+                    eprintln!("URL: {url}");
+                });
+                eprintln!("Waiting for scan (up to {} minutes)…", LINK_TIMEOUT_SECS / 60);
             }
-        },
-    )
-    .await;
+            Err(e) => error!("provisioning cancelled: {e}"),
+        }
+    };
 
-    manager_result.context("device linking failed")
+    let joined = future::join(link_fut, qr_fut);
+    match tokio::time::timeout(std::time::Duration::from_secs(LINK_TIMEOUT_SECS), joined).await {
+        Ok((Ok(manager), _)) => Ok(manager),
+        Ok((Err(e), _)) => Err(anyhow::Error::new(e).context("device linking failed")),
+        Err(_) => anyhow::bail!(
+            "Linking timed out after {} seconds. Scan the QR within the window and rerun `sst link`.",
+            LINK_TIMEOUT_SECS
+        ),
+    }
 }

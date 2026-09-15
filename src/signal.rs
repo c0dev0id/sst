@@ -19,6 +19,29 @@ use presage::libsignal_service::sender::AttachmentSpec;
 /// Apply in chronological order to handle add/remove toggles correctly.
 pub type ReactionMap = HashMap<u64, HashMap<String, HashSet<[u8; 16]>>>;
 
+/// If an error looks like Signal rejected this device's credentials, return
+/// a user-facing message. Walks the anyhow chain and matches on Display text
+/// because presage bubbles WS-upgrade 403s through `ServiceError::WsError`
+/// without a dedicated variant, and downcasting would drag libsignal_service
+/// types into main.rs.
+pub fn relink_hint(err: &anyhow::Error) -> Option<&'static str> {
+    for cause in err.chain() {
+        let s = cause.to_string();
+        if s.contains("403")
+            || s.contains("Forbidden")
+            || s.contains("Authorization failed")
+            || s.contains("please relink")
+            || s.contains("Unauthorized")
+        {
+            return Some(
+                "Signal rejected this device. \
+                 Run `sst link` to re-provision.",
+            );
+        }
+    }
+    None
+}
+
 /// Format a per-emoji reaction sub-map into sorted `"NxE"` strings.
 /// Shared by the status-bar hint in app.rs and the inline renderer in ui.rs.
 pub(crate) fn fmt_reaction_pairs(map: &HashMap<String, HashSet<[u8; 16]>>) -> Vec<String> {
