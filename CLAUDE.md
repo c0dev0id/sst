@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`README.md`** — user-facing spec: TUI keybindings, modal design, CLI subcommands, on-disk layout. Treat as ground truth for UX and CLI surface.
 - **`.github/development-journal.md`** — stack rationale and hard-won gotchas: OpenBSD SQLite workaround, presage store limitations, ratchet/receive-stream quirks, attachment pipeline, CLI redesign notes. Read before touching anything Signal-related.
 - **`CHANGELOG.md`** — what shipped when. Keep updated per user's global rules.
-- **`TODO.md`** — open work items.
+- **`TODO.md`** — open work items. When a feature ships, remove its entry (don't leave it marked done) and update any wording that no longer matches the implemented mechanism, so the list keeps reflecting only genuinely open work.
 
 This file is intentionally short: everything below is either the module map (which is not written down elsewhere) or a warning about landmines the journal doesn't cover.
 
