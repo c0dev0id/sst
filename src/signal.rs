@@ -287,7 +287,7 @@ async fn drain_backlog<S: Store>(
             Received::QueueEmpty => {
                 if show_progress {
                     if count > 0 {
-                        // Overwrite the in-place counter line.
+                        // Trailing spaces overwrite leftover digits from the longer counter line.
                         eprintln!("\rSynced {count} messages.        ");
                     } else {
                         eprintln!("Already up to date.");
