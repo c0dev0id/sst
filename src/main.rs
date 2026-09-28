@@ -253,6 +253,7 @@ async fn run<S: Store>(
     match cmd {
         None => {
             let stream = signal::connect(&mut manager, &mut state).await?;
+            eprintln!("Loading chats…");
             let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
             app::run(threads, state.own_aci, state.data_dir, manager, stream).await
         }

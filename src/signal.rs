@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
@@ -272,6 +273,7 @@ async fn drain_backlog<S: Store>(
     stream: &mut (impl Stream<Item = Received> + Unpin),
     manager: &mut Manager<S, Registered>,
     state: &mut SyncState,
+    show_progress: bool,
 ) -> anyhow::Result<()> {
     let own_aci = manager.whoami().await?.aci;
     state.own_aci = Some(own_aci);
@@ -283,11 +285,23 @@ async fn drain_backlog<S: Store>(
     while let Some(event) = stream.next().await {
         match event {
             Received::QueueEmpty => {
+                if show_progress {
+                    if count > 0 {
+                        // Overwrite the in-place counter line.
+                        eprintln!("\rSynced {count} messages.        ");
+                    } else {
+                        eprintln!("Already up to date.");
+                    }
+                }
                 tracing::info!("sync complete ({count} messages)");
                 break;
             }
             Received::Content(content) => {
                 count += 1;
+                if show_progress {
+                    eprint!("\rSyncing messages… {count}");
+                    let _ = std::io::stderr().flush();
+                }
                 match Thread::try_from(content.as_ref()) {
                     Ok(Thread::Group(key)) => {
                         seen_group_keys.insert(key);
@@ -309,9 +323,14 @@ async fn drain_backlog<S: Store>(
     known_groups.extend(seen_group_keys);
     let _ = save_chunks(&state.groups_path(), &known_groups);
 
+    let mut announced_group_fetch = false;
     for key in &known_groups {
         if manager.store().group(*key).await?.is_some() {
             continue;
+        }
+        if show_progress && !announced_group_fetch {
+            eprintln!("Fetching group metadata…");
+            announced_group_fetch = true;
         }
         let ctx = GroupContextV2 {
             master_key: Some(key.to_vec()),
@@ -390,7 +409,7 @@ pub async fn sync<S: Store>(
             .await
             .context("failed to start receive stream")?,
     );
-    drain_backlog(&mut stream, manager, state).await
+    drain_backlog(&mut stream, manager, state, false).await
 }
 
 /// Drain the message queue then return the live stream for TUI mode.
@@ -398,13 +417,14 @@ pub async fn connect<S: Store>(
     manager: &mut Manager<S, Registered>,
     state: &mut SyncState,
 ) -> anyhow::Result<Pin<Box<dyn Stream<Item = Received>>>> {
+    eprintln!("Connecting to Signal…");
     let mut stream: Pin<Box<dyn Stream<Item = Received>>> = Box::pin(
         manager
             .receive_messages()
             .await
             .context("failed to start receive stream")?,
     );
-    drain_backlog(&mut stream, manager, state).await?;
+    drain_backlog(&mut stream, manager, state, true).await?;
     Ok(stream)
 }
 
