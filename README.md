@@ -80,15 +80,3 @@ alongside the TUI; other subcommands hold an exclusive lock.
 
 `<ID>` is a contact UUID or 64-char hex group master key (from `sst contacts`).
 Add `--format=json` for NDJSON output, or `--db <PATH>` to override the store location.
-
-## Building
-
-| Target | Result |
-|--------|--------|
-| `make` | Debug build (`target/debug/sst`) |
-| `make release` | Release build |
-| `make install` | Install release binary to `~/.bin/sst` |
-| `make test` | Run the test suite |
-
-Built on [presage](https://github.com/whisperfish/presage),
-[ratatui](https://github.com/ratatui/ratatui), and [tokio](https://tokio.rs).
