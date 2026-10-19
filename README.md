@@ -1,4 +1,4 @@
-# SST — Simple Signal TUI
+![SST — Simple Signal TUI](assets/banner.svg)
 
 A terminal client for Signal. For people who live in the shell and want to read,
 send, and script Signal messages without a desktop GUI.
