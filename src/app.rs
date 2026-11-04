@@ -912,59 +912,55 @@ async fn execute_cmd<S: Store>(
             app.view = View::ChatList;
         }
         AppCmd::SendMessage => {
-            let (text, body_ranges, thread, quoted, editing, staged) = {
-                let chat = app.chat.as_mut().expect("SendMessage with no open chat");
-                chat.cursor = 0;
-                let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_ref);
-                let editing = chat.editing.take();
-                chat.reply_to = None;
-                // Take staged attachments out now; on upload failure restore them below.
-                let staged = if editing.is_none() {
-                    std::mem::take(&mut chat.staged_attachments)
-                } else {
-                    Vec::new()
-                };
-                let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
-                chat.input.clear();
-                (text, body_ranges, chat.thread.clone(), quoted, editing, staged)
-            };
+            let chat = app.chat.as_mut().expect("SendMessage with no open chat");
+            let thread = chat.thread.clone();
 
-            let pointers = if !staged.is_empty() {
-                match signal::upload_staged_attachments(manager, &staged).await {
-                    Ok(pts) => {
-                        if let Some(c) = &mut app.chat {
-                            c.selected_attachment = None;
-                        }
-                        pts
-                    }
-                    Err((msg, failed_path)) => {
-                        if let Some(c) = &mut app.chat {
-                            c.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
-                            if let Some(sel) = c.selected_attachment {
-                                let len = c.staged_attachments.len();
-                                c.selected_attachment = if len == 0 { None } else { Some(sel.min(len - 1)) };
-                            }
-                            c.autocomplete_hint = Some(msg);
-                        }
-                        return Ok(());
-                    }
-                }
+            // Upload before touching the draft, so a failed upload keeps the text,
+            // reply target and edit target for a retry; only the failed file is dropped.
+            let staged = if chat.editing.is_none() {
+                std::mem::take(&mut chat.staged_attachments)
             } else {
                 Vec::new()
             };
-
-            if !text.is_empty() || !pointers.is_empty() {
-                if let Some((_idx, edit_ts)) = editing {
-                    signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await?;
-                    if let Some(c) = &mut app.chat { c.selected_message = None; }
-                } else if let Some(quoted) = quoted {
-                    signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await?;
-                    if let Some(c) = &mut app.chat { c.selected_message = None; }
-                } else {
-                    signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await?;
+            let pointers = if staged.is_empty() {
+                Vec::new()
+            } else {
+                match signal::upload_staged_attachments(manager, &staged).await {
+                    Ok(pts) => {
+                        chat.selected_attachment = None;
+                        pts
+                    }
+                    Err((msg, failed_path)) => {
+                        chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
+                        if let Some(sel) = chat.selected_attachment {
+                            let len = chat.staged_attachments.len();
+                            chat.selected_attachment = if len == 0 { None } else { Some(sel.min(len - 1)) };
+                        }
+                        chat.autocomplete_hint = Some(msg);
+                        return Ok(());
+                    }
                 }
-                reload_chat(manager, &thread, &mut app.chat).await;
+            };
+
+            let quoted = chat.reply_to.take().and_then(|idx| chat.messages.get(idx)).map(signal::quote_ref);
+            let editing = chat.editing.take();
+            let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
+            chat.input.clear();
+            chat.cursor = 0;
+            if text.is_empty() && pointers.is_empty() {
+                return Ok(());
             }
+
+            if let Some((_idx, edit_ts)) = editing {
+                signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await?;
+                chat.selected_message = None;
+            } else if let Some(quoted) = quoted {
+                signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await?;
+                chat.selected_message = None;
+            } else {
+                signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await?;
+            }
+            reload_chat(manager, &thread, &mut app.chat).await;
         }
         AppCmd::ExecCmd(cmd_text) => {
             let colon_input = format!(":{}", cmd_text);
