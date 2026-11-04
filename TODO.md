@@ -10,5 +10,13 @@
 ### Chat window
 - [ ] Typing notifications in the status bar (incoming typing events are currently discarded)
 
+### Signal parity
+- [ ] Delivery receipts: sst never sends `ReceiptMessage.DELIVERY`. The phone covers delivery state for the account, so impact is low, but linked desktop clients do send them.
+- [ ] Disappearing messages are never expired locally. Doing it right needs the per-message read time, which is the same persisted "last seen" record as unread tracking.
+- [ ] `Received::Contacts` arriving mid-session is ignored; names refresh on restart only.
+- [ ] Signal caps edits at 10 per message; sst enforces the 24-hour window only.
+- [ ] `print --format=json` carries no quote, reactions or attachments; `print` does not mark edited messages.
+- [ ] `sst send` runs without the instance lock so a script can reply beside `sst watch`. Both write ratchet state; the window is short but real. A daemon with a send socket would close it.
+
 ### Thread management
 - [ ] `d` key on the chat list to delete a thread, with confirmation (chat-window `dd` delete-for-everyone already exists; this is list-level thread deletion)

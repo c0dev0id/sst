@@ -30,17 +30,17 @@ make install    # install release binary to ~/.bin/sst
 
 Four files under `src/`. Read in this order for a first pass:
 
-- **`main.rs`** (~500 lines) — Entry point, clap CLI, provisioning, instance lock, tokio runtime bootstrap. Dispatches to either `app::run` (TUI) or one of the `Cmd::{Link, Chats, Contacts, Print, PrintLast, Watch, Send}` handlers inline. `parse_thread_id` accepts a UUID (contact) or 64-char hex (group master key). The `send`/`print`/`print-last` subcommands intentionally skip the exclusive lock; all others hold it.
-- **`signal.rs`** (~1100 lines) — All presage interaction lives here. Public API: `connect`, `sync`, `sync_contacts`, `list_threads`, `list_all_contacts`, `load_messages`, `load_messages_and_reactions`, `load_receipt_state`, `load_sender_names`, `send_to_thread`, `send_reply`, `send_edit`, `send_reaction`, `send_read_receipt`, `delete_for_everyone`, `stage_attachment`, `upload_staged_attachments`, `download_attachment`, `fetch_missing_profiles`, `extract_update`, `message_body`, `message_quote`, `quote_ref`, `encode_mentions`, `mentioned_acis`, `mention_names`, `name_or_uuid`, `fmt_ts_long`. Types: `ThreadEntry`, `MessageUpdate`, `SyncState`, `StagedAttachment`, `ReactionMap`, `QuoteRef`.
-- **`app.rs`** (~1300 lines) — TUI state machine and event loop. `App` owns `threads`, `chat: Option<ChatState>`, view enum, and contact-browser state. `ChatState` carries the transient per-chat state (messages, cursor, mode, selection, reactions, staged attachments). Key handling is dispatched by view (`on_key_list`, `on_key_chat`, `on_key_contacts`) and by mode (`Normal`/`Insert`/`Command(String)`). `on_key` returns an `AppCmd`; the async event loop passes it to `execute_cmd` which does the actual Signal I/O and mutates `App`.
-- **`ui.rs`** (~640 lines) — Pure ratatui rendering. No mutation of `App` beyond the widget-state fields ratatui writes back into (`ListState` selection, `viewport_top_msg`). Anything else is a bug.
+- **`main.rs`** (~600 lines) — Entry point, clap CLI, provisioning, instance lock, tokio runtime bootstrap. Dispatches to either `app::run` (TUI) or one of the `Cmd::{Link, Chats, Contacts, Print, PrintLast, Watch, Send}` handlers inline. `parse_thread_id` accepts a UUID (contact) or 64-char hex (group master key). The `send`/`print`/`print-last` subcommands intentionally skip the exclusive lock; all others hold it.
+- **`signal.rs`** (~1600 lines) — All presage interaction lives here. Public API: `relink_hint`, `stage_attachment`, `fmt_attachment_size`, `upload_staged_attachments`, `message_attachments`, `attachment_filename`, `unique_path`, `download_attachment`, `sync_contacts`, `sync`, `connect`, `affects_thread`, `extract_update`, `list_threads`, `list_all_contacts`, `fetch_missing_profiles`, `message_body`, `expire_timer`, `message_text`, `mentioned_acis`, `mention_names`, `thread_title`, `name_or_uuid`, `encode_mentions`, `quote_ref`, `lookup_contact_name`, `load_sender_names`, `load_messages_and_reactions`, `delete_for_everyone`, `send_reaction`, `outside_edit_window`, `send_edit`, `send_to_thread`, `send_reply`, `message_quote`, `own_aci`, `oldest_own_message_ts`, `load_receipt_state`, `send_read_receipts`. Types: `ReactionMap`, `ThreadEntry`, `MessageUpdate`, `SyncState`, `StagedAttachment`, `QuoteRef`.
+- **`app.rs`** (~1400 lines) — TUI state machine and event loop. `App` owns `threads`, `chat: Option<ChatState>`, view enum, and contact-browser state. `ChatState` carries the transient per-chat state (messages, cursor, mode, selection, reactions, staged attachments). Key handling is dispatched by view (`on_key_list`, `on_key_chat`, `on_key_contacts`) and by mode (`Normal`/`Insert`/`Command(String)`). `on_key` returns an `AppCmd`; the async event loop passes it to `execute_cmd` which does the actual Signal I/O and mutates `App`. An error from `execute_cmd` goes to `App::show_error` (status bar), never out of the loop.
+- **`ui.rs`** (~700 lines) — Pure ratatui rendering. No mutation of `App` beyond the widget-state fields ratatui writes back into (`ListState` selection, `viewport_top_msg`). Anything else is a bug.
 
 ## Event loop (in `app::run`)
 
 ```
 tokio::select! {
     event = events.next()              => on_key / on_paste → execute_cmd
-    event = next_or_pending(&mut stream) => on_signal + reload chat if open
+    event = next_or_pending(&mut stream) => extract_update → apply_update / add_thread; reload chat if affects_thread
 }
 ```
 
@@ -48,6 +48,7 @@ tokio::select! {
 - Signal events come from `Manager::receive_messages() -> Stream<Item = Received>`. The stream can and will die (see dev journal "Signal receive stream may close after first live event") — when it does, `next_or_pending` returns `None`, we sleep 500 ms and attempt `receive_messages()` again. `signal_stream` is `Option<Pin<Box<...>>>`; `None` means "reconnecting".
 - A panic hook restores the terminal (raw mode off, alt-screen out, bracketed paste off) so an unexpected panic doesn't corrupt the user's shell. Do not remove.
 - `ui.rs` runs synchronously inside `terminal.draw(...)`; `execute_cmd` runs outside it and awaits Signal I/O. Keep Signal calls out of the draw path.
+- The open chat is reloaded only when `signal::affects_thread` says the event can change it: a message in that thread, or any receipt. Typing indicators never trigger a reload.
 
 ## Commands are colon commands, not slash commands
 
@@ -77,6 +78,8 @@ Pre-1.0.0: no migration code. If the on-disk format changes, `sst link` wipes an
 - **`selected_message` and `selected_attachment` are mutually exclusive** in `ChatState`. Navigation forms a circular ring: oldest message → newest → first staged file → last staged file → oldest message. Don't add a second selection cursor; extend the ring.
 - **Cursor is a byte offset** into the UTF-8 input string. Visual (line, column) is derived at render time via `cursor_line_col`. Keep it that way — two representations will desync.
 - **Groups always have a title** in Signal; no unnamed-group fallback is needed. But group metadata may be missing right after `sst link` (see journal "Group metadata gap after fresh device linking") — this is a presage limitation, not a bug in this code.
+- **A thread's rows are not all messages.** presage stores receipts (including the ones sst sends), NullMessage rows from remote deletes, call signalling and edit records in the thread table. Anything deriving "newest message" or "display list" must go through `message_body` emptiness, as `last_message` and `load_messages_and_reactions` do. `ContentExt::timestamp()` of an EditMessage is the *target's* timestamp.
+- **Group receipts live in members' 1:1 threads.** A ReceiptMessage has no group context, so presage files it under `Thread::Contact(sender)`. `load_receipt_state` scans roster members' threads for groups; `send_read_receipts` sends to each author and syncs `SyncMessage.read` to own devices.
 - **Mentions are not text.** `@Name` exists only in the input buffer and on screen. On the wire a mention is U+FFFC in the body plus a `BodyRange` with UTF-16 offsets. `encode_mentions` and `substitute_mentions` are the only two places that know this; `message_body` takes a name resolver for that reason. Never display a raw `DataMessage.body`.
 - **`Manager::send_message()` writes to the local store synchronously before returning** — after send, reload messages from the DB directly rather than waiting for the SyncMessage echo. This is what `reload_chat` does.
 

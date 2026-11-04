@@ -129,6 +129,8 @@ The old CLI used ad-hoc boolean flags (`--list`, `--send`, `--read-stream`, etc.
 
 Global `--db <path>` overrides the store location for all subcommands.
 
+Lock modes: interactive and streaming subcommands require the instance lock and fail if it is held. `print` and `print-last` take it when free so they can sync first; when another instance holds it they read the store as is, since that instance keeps it current. `send` never takes it so a script can reply while `sst watch` streams; both write ratchet state, so that race is accepted rather than solved (see TODO).
+
 `--format=json` outputs one JSON object per line (NDJSON). `--format=text` (default) outputs human-readable lines. `Format` uses `#[derive(ValueEnum)]` with `impl Display` so clap can display the default in `--help`. PascalCase variants become kebab-case automatically (`PrintLast` → `print-last`).
 
 ### Mentions are body ranges, not text
@@ -142,6 +144,47 @@ roster, longest name first) and `substitute_mentions` converts back for display.
 Quotes carry their own `body_ranges`, and so do edits. Offsets must be counted in
 UTF-16 units, not bytes or chars, or an emoji earlier in the line shifts the
 highlight on the recipient's client.
+
+### Receipts for group messages live in 1:1 threads
+
+presage derives a receipt's thread from its sender, and a ReceiptMessage carries no
+group context, so a member's delivery or read receipt for a group message is stored
+under `Thread::Contact(member)`. `load_receipt_state` therefore scans every roster
+member's thread for a group, starting at the oldest own message in the group, and
+skips receipts sst sent itself. Read receipts go to each author individually, which
+is also how the official clients send them, and every batch is followed by a
+`SyncMessage.read` to the user's other devices so they clear the unread state.
+A message counts as delivered or read as soon as one recipient says so, as on
+Signal Android.
+
+### Rows in a thread that are not messages
+
+The store keeps receipts (including the ones sst sends), NullMessage rows left by
+remote deletes, call signalling and edit records in the same thread table as
+messages. Anything that derives "newest message" must skip them; the chat list used
+to jump to the top on opening a chat because `last_message` took the first row's
+timestamp, which was sst's own read receipt. `ContentExt::timestamp()` of an
+EditMessage is the target's timestamp, not the edit's. Two rows with the same
+millisecond timestamp in one thread overwrite each other (`INSERT OR REPLACE` on
+`(ts, thread_id)`), and ordering uses the sender's timestamp, so a peer with a
+skewed clock sorts out of place. The phone's call-event syncs are stored under the
+user's own thread rather than the peer's, so sst renders only the incoming offer,
+as "Incoming call", and drops the rest of the signalling.
+
+### Edits are complete messages
+
+An EditMessage's DataMessage replaces the original in full. Official clients re-send
+the quote and attachment pointers and carry the thread's expire timer. presage's
+`restore_thread_timer` fills the timer for DataMessage bodies only, so `send_edit`
+copies quote, attachments and timer itself. Signal accepts edits and
+delete-for-everyone for 24 hours; recipients ignore later requests, so sst refuses
+them up front instead of applying them locally and diverging.
+
+### Errors stay in the TUI
+
+`execute_cmd` errors are shown on the status bar and logged; they never propagate out
+of the event loop. A send consumes the draft only after the send succeeds, so a
+failed upload or send leaves text, reply or edit target and files in place.
 
 ## Core Features
 
