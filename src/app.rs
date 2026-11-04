@@ -335,32 +335,18 @@ impl App {
                             chat.status = Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
-                    KeyCode::Char('e') => {
-                        if let Some(sel_idx) = chat.selected_message {
-                            if let Some(content) = chat.messages.get(sel_idx) {
-                                let is_own = own_aci
-                                    .is_some_and(|a| a == content.metadata.sender.raw_uuid());
-                                let ts = content.timestamp();
-                                if !is_own {
-                                    chat.status =
-                                        Some("can only edit own messages".to_string());
-                                } else if signal::outside_edit_window(ts) {
-                                    chat.status =
-                                        Some("can only edit messages from the last 24 hours".to_string());
-                                } else {
-                                    // Roster names only: a label like "Attachment" or "You" would be sent as text.
-                                    let body = signal::message_text(content, |u| signal::name_or_uuid(&chat.sender_names, u));
-                                    chat.input = body;
-                                    chat.cursor = chat.input.len();
-                                    chat.editing = Some(ts);
-                                    chat.mode = Mode::Insert;
-                                }
-                            }
-                        } else {
-                            chat.status =
-                                Some(HINT_SELECT_FIRST.to_string());
+                    KeyCode::Char('e') => match mutable_selection(chat, own_aci, "edit") {
+                        Err(why) => chat.status = Some(why),
+                        Ok(content) => {
+                            let ts = content.timestamp();
+                            // Roster names only: a label like "Attachment" or "You" would be sent as text.
+                            let body = signal::message_text(content, |u| signal::name_or_uuid(&chat.sender_names, u));
+                            chat.input = body;
+                            chat.cursor = chat.input.len();
+                            chat.editing = Some(ts);
+                            chat.mode = Mode::Insert;
                         }
-                    }
+                    },
                     KeyCode::Char('d') => {
                         if let Some(att_idx) = chat.selected_attachment {
                             if chat.pending_d {
@@ -371,23 +357,14 @@ impl App {
                                 chat.pending_d = true;
                                 chat.status = Some("d again to remove attachment".to_string());
                             }
-                        } else if let Some(content) = chat.selected_message.and_then(|i| chat.messages.get(i)) {
-                            let is_own = own_aci.is_some_and(|a| a == content.metadata.sender.raw_uuid());
-                            let ts = content.timestamp();
-                            if !is_own {
-                                chat.status = Some("can only delete own messages".to_string());
-                            } else if signal::outside_edit_window(ts) {
-                                chat.status =
-                                    Some("can only delete messages from the last 24 hours".to_string());
-                            } else if chat.pending_d {
-                                chat.pending_d = false;
-                                return Some(AppCmd::DeleteMessage);
-                            } else {
-                                chat.pending_d = true;
-                                chat.status = Some("d again to delete for everyone".to_string());
-                            }
+                        } else if let Err(why) = mutable_selection(chat, own_aci, "delete") {
+                            chat.status = Some(why);
+                        } else if chat.pending_d {
+                            chat.pending_d = false;
+                            return Some(AppCmd::DeleteMessage);
                         } else {
-                            chat.status = Some(HINT_SELECT_FIRST.to_string());
+                            chat.pending_d = true;
+                            chat.status = Some("d again to delete for everyone".to_string());
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -704,6 +681,21 @@ const COLON_COMMANDS: &[(&str, ArgKind)] = &[
 ];
 
 const HINT_SELECT_FIRST: &str = "select a message first (j/k)";
+
+/// The selected message if the user may edit or delete it, otherwise the status
+/// text saying why not. `verb` is "edit" or "delete".
+fn mutable_selection<'a>(chat: &'a ChatState, own_aci: Option<Uuid>, verb: &str) -> Result<&'a Content, String> {
+    let Some(content) = chat.selected_message.and_then(|i| chat.messages.get(i)) else {
+        return Err(HINT_SELECT_FIRST.to_string());
+    };
+    if !signal::is_own(content, own_aci) {
+        return Err(format!("can only {verb} own messages"));
+    }
+    if signal::outside_edit_window(content.timestamp()) {
+        return Err(format!("can only {verb} messages from the last 24 hours"));
+    }
+    Ok(content)
+}
 
 enum ColonCmd<'a> {
     Quit,
@@ -1063,13 +1055,12 @@ async fn execute_cmd<S: Store>(
                         chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
                         chat.selected_attachment =
                             chat.selected_attachment.and_then(|sel| clamp_selection(sel, chat.staged_attachments.len()));
-                        chat.status = Some(msg);
-                        return Ok(());
+                        return Err(anyhow::anyhow!(msg));
                     }
                 }
             };
 
-            let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_ref);
+            let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_of);
             let targeted = chat.editing.is_some() || quoted.is_some();
             let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
             if text.is_empty() && pointers.is_empty() {
@@ -1101,13 +1092,13 @@ async fn execute_cmd<S: Store>(
                 Err(e) => {
                     // Keep the draft and put the files back so a retry re-uploads them.
                     chat.staged_attachments = staged;
-                    chat.status = Some(format!("send failed: {e:#}"));
+                    return Err(e.context("send failed"));
                 }
             }
         }
         AppCmd::ExecCmd(cmd_text) => {
             let colon_input = format!(":{}", cmd_text);
-            let quote_info = app.chat.as_ref().and_then(|c| {
+            let react_target = app.chat.as_ref().and_then(|c| {
                 let idx = c.selected_message?;
                 let msg = c.messages.get(idx)?;
                 Some((msg.timestamp(), msg.metadata.sender.raw_uuid()))
@@ -1122,7 +1113,7 @@ async fn execute_cmd<S: Store>(
                     app.quit = true;
                 }
                 Some(ColonCmd::React("")) => {
-                    let hint = if let Some((target_ts, _)) = quote_info {
+                    let hint = if let Some((target_ts, _)) = react_target {
                         if let Some(chat) = &app.chat {
                             reaction_hint(&chat.reactions, target_ts)
                         } else {
@@ -1136,7 +1127,7 @@ async fn execute_cmd<S: Store>(
                     }
                 }
                 Some(ColonCmd::React(arg)) => {
-                    if let Some((target_ts, target_author)) = quote_info {
+                    if let Some((target_ts, target_author)) = react_target {
                         if let Some(emoji) = resolve_emoji(arg) {
                             let remove = app.own_aci
                                 .and_then(|u| {

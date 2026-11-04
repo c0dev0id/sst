@@ -939,24 +939,18 @@ fn word_ends(after: &str) -> bool {
     after.chars().next().is_none_or(|c| !c.is_alphanumeric())
 }
 
-/// What a reply quotes: the original's timestamp, author, text with its mention
-/// ranges, and the type of any media it carried.
-pub struct QuoteRef {
-    pub ts: u64,
-    pub author: Uuid,
-    pub text: Option<String>,
-    pub body_ranges: Vec<BodyRange>,
-    pub attachments: Vec<QuotedAttachment>,
-}
-
-pub fn quote_ref(content: &Content) -> QuoteRef {
+/// The quote a reply to `content` carries: the original's timestamp, author,
+/// text with its mention ranges, and the type of any media it had.
+pub fn quote_of(content: &Content) -> data_message::Quote {
     let msg = data_message_of(content);
     let media = msg.into_iter().flat_map(|m| {
         m.attachments.iter().chain(m.sticker.as_ref().and_then(|s| s.data.as_ref()))
     });
-    QuoteRef {
-        ts: content.timestamp(),
-        author: content.metadata.sender.raw_uuid(),
+    let author = content.metadata.sender.raw_uuid();
+    data_message::Quote {
+        id: Some(content.timestamp()),
+        author_aci: Some(author.to_string()),
+        author_aci_binary: Some(author.as_bytes().to_vec()),
         text: msg.and_then(|m| m.body.clone()).filter(|b| !b.is_empty()),
         body_ranges: msg.map(|m| m.body_ranges.clone()).unwrap_or_default(),
         attachments: media
@@ -966,6 +960,7 @@ pub fn quote_ref(content: &Content) -> QuoteRef {
                 thumbnail: None,
             })
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -1261,19 +1256,10 @@ pub async fn send_reply<S: Store>(
     thread: &Thread,
     text: String,
     body_ranges: Vec<BodyRange>,
-    quoted: QuoteRef,
+    quote: data_message::Quote,
     attachments: Vec<AttachmentPointer>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
-    let quote = data_message::Quote {
-        id: Some(quoted.ts),
-        author_aci: Some(quoted.author.to_string()),
-        author_aci_binary: Some(quoted.author.as_bytes().to_vec()),
-        text: quoted.text,
-        body_ranges: quoted.body_ranges,
-        attachments: quoted.attachments,
-        ..Default::default()
-    };
     let data_message = DataMessage {
         body: if text.is_empty() { None } else { Some(text) },
         body_ranges,
