@@ -60,6 +60,16 @@ pub struct ChatState {
     pub selected_attachment: Option<usize>, // mutually exclusive with selected_message
 }
 
+impl ChatState {
+    /// Name shown for a thread participant; the local account is "You".
+    pub fn display_name(&self, uuid: Uuid, own_aci: Option<Uuid>) -> String {
+        if own_aci == Some(uuid) {
+            return "You".to_string();
+        }
+        self.sender_names.get(&uuid).cloned().unwrap_or_else(|| uuid.to_string())
+    }
+}
+
 pub enum AppCmd {
     OpenChat { thread: Thread, name: String },
     OpenContactBrowser,
@@ -279,8 +289,8 @@ impl App {
                                 let is_own = own_aci
                                     .is_some_and(|a| a == content.metadata.sender.raw_uuid());
                                 if is_own {
-                                    let body = signal::message_body(content).to_string();
                                     let ts = content.timestamp();
+                                    let body = signal::message_body(content, |u| chat.display_name(u, own_aci));
                                     chat.input = body;
                                     chat.cursor = chat.input.len();
                                     chat.editing = Some((sel_idx, ts));
@@ -550,9 +560,11 @@ impl App {
         }
     }
 
-    pub fn on_signal(&mut self, received: Received) {
-        let Received::Content(boxed) = received else { return };
-        let Some(update) = signal::extract_update(&boxed) else { return };
+    /// Update the thread list from a live event. `names` resolves mentioned accounts.
+    pub fn on_signal(&mut self, content: &Content, names: &HashMap<Uuid, String>) {
+        let Some(update) = signal::extract_update(content, |u| signal::name_or_uuid(names, u)) else {
+            return;
+        };
 
         if let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) {
             entry.last_preview = Some(update.preview);
@@ -900,6 +912,7 @@ async fn execute_cmd<S: Store>(
             app.view = View::ChatList;
         }
         AppCmd::SendMessage => {
+            let own_aci = app.own_aci;
             let (text, thread, reply_info, editing, staged) = {
                 let chat = app.chat.as_mut().expect("SendMessage with no open chat");
                 chat.cursor = 0;
@@ -908,7 +921,7 @@ async fn execute_cmd<S: Store>(
                     Some((
                         msg.timestamp(),
                         msg.metadata.sender.raw_uuid(),
-                        signal::message_body(msg),
+                        signal::message_body(msg, |u| chat.display_name(u, own_aci)),
                     ))
                 });
                 let editing = chat.editing.take();
@@ -965,11 +978,7 @@ async fn execute_cmd<S: Store>(
             let quote_info = app.chat.as_ref().and_then(|c| {
                 let idx = c.selected_message?;
                 let msg = c.messages.get(idx)?;
-                Some((
-                    msg.timestamp(),
-                    msg.metadata.sender.raw_uuid(),
-                    signal::message_body(msg),
-                ))
+                Some((msg.timestamp(), msg.metadata.sender.raw_uuid()))
             });
             let thread = match app.chat.as_ref().map(|c| c.thread.clone()) {
                 Some(t) => t,
@@ -981,7 +990,7 @@ async fn execute_cmd<S: Store>(
                     app.quit = true;
                 }
                 Some(ColonCmd::React("")) => {
-                    let hint = if let Some((target_ts, _, _)) = quote_info {
+                    let hint = if let Some((target_ts, _)) = quote_info {
                         if let Some(chat) = &app.chat {
                             reaction_hint(&chat.reactions, target_ts)
                         } else {
@@ -995,7 +1004,7 @@ async fn execute_cmd<S: Store>(
                     }
                 }
                 Some(ColonCmd::React(arg)) => {
-                    if let Some((target_ts, target_author, _)) = quote_info {
+                    if let Some((target_ts, target_author)) = quote_info {
                         if let Some(emoji) = resolve_emoji(arg) {
                             let remove = app.own_aci
                                 .and_then(|u| {
@@ -1241,7 +1250,10 @@ pub async fn run<S: Store>(
                 }
                 event = next_or_pending(&mut signal_stream) => {
                     if let Some(received) = event {
-                        app.on_signal(received);
+                        if let Received::Content(content) = &received {
+                            let names = signal::mention_names(&manager, content).await;
+                            app.on_signal(content, &names);
+                        }
                         // Reload chat messages and receipt state on any incoming event.
                         if matches!(app.view, View::ChatWindow)
                             && let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone())

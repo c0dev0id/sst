@@ -13,7 +13,7 @@ use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
-use presage::libsignal_service::proto::{AttachmentPointer, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, receipt_message, sync_message::Sent};
+use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, body_range::AssociatedValue, data_message, receipt_message, sync_message::Sent};
 use presage::libsignal_service::sender::AttachmentSpec;
 
 /// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
@@ -428,12 +428,12 @@ pub async fn connect<S: Store>(
     Ok(stream)
 }
 
-pub fn extract_update(content: &Content) -> Option<MessageUpdate> {
+pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Option<MessageUpdate> {
     let thread = Thread::try_from(content).ok()?;
     // Receipts, typing messages, and other no-body events have no preview.
     // Bailing here keeps the thread's last_preview and last_ts intact so they
     // can't clear a visible preview or push the thread to the top.
-    let body = message_body(content);
+    let body = message_body(content, name_of);
     if body.is_empty() {
         return None;
     }
@@ -623,7 +623,8 @@ async fn last_message<S: Store>(
             last_ts = ts; // most recent message timestamp, for sort order
         }
         if last_preview.is_none() {
-            let body = message_body(&content);
+            let names = mention_names(manager, &content).await;
+            let body = message_body(&content, |u| name_or_uuid(&names, u));
             if !body.is_empty() {
                 last_preview = Some(body);
                 break;
@@ -633,31 +634,92 @@ async fn last_message<S: Store>(
     (last_preview, last_ts)
 }
 
-pub fn message_body(content: &Content) -> String {
+/// The DataMessage carried by incoming content or by a sync of our own sent message.
+fn data_message_of(content: &Content) -> Option<&DataMessage> {
     match &content.body {
-        ContentBody::DataMessage(msg) => data_message_body(msg),
+        ContentBody::DataMessage(msg) => Some(msg),
         ContentBody::SynchronizeMessage(SyncMessage {
             sent: Some(Sent { message: Some(msg), .. }),
             ..
-        }) => data_message_body(msg),
+        }) => Some(msg),
+        _ => None,
+    }
+}
+
+/// Display text of a message. Mention placeholders become `@Name` via `name_of`;
+/// attachment-only, sticker and call messages get a label instead of text.
+pub fn message_body(content: &Content, name_of: impl Fn(Uuid) -> String) -> String {
+    if let Some(msg) = data_message_of(content) {
+        return data_message_body(msg, name_of);
+    }
+    match &content.body {
         ContentBody::CallMessage(_) => "Call".to_string(),
         _ => String::new(),
     }
 }
 
-fn data_message_body(msg: &DataMessage) -> String {
-    if let Some(text) = &msg.body
-        && !text.is_empty()
-    {
-        return text.clone();
+fn data_message_body(msg: &DataMessage, name_of: impl Fn(Uuid) -> String) -> String {
+    match msg.body.as_deref() {
+        Some(text) if !text.is_empty() => substitute_mentions(text, &msg.body_ranges, name_of),
+        _ if !msg.attachments.is_empty() => "Attachment".to_string(),
+        _ if msg.sticker.is_some() => "Sticker".to_string(),
+        _ => String::new(),
     }
-    if !msg.attachments.is_empty() {
-        return "Attachment".to_string();
+}
+
+/// Mention ranges as (start, length, aci); offsets are UTF-16 code units as on the wire.
+fn mention_ranges(ranges: &[BodyRange]) -> impl Iterator<Item = (usize, usize, Uuid)> + '_ {
+    ranges.iter().filter_map(|r| {
+        let aci = match r.associated_value.as_ref()? {
+            AssociatedValue::MentionAciBinary(bytes) => Uuid::from_slice(bytes).ok()?,
+            AssociatedValue::MentionAci(s) => Uuid::parse_str(s).ok()?,
+            AssociatedValue::Style(_) => return None,
+        };
+        Some((r.start? as usize, r.length? as usize, aci))
+    })
+}
+
+/// Replace each mention placeholder (U+FFFC) in `body` with `@Name`.
+fn substitute_mentions(body: &str, ranges: &[BodyRange], name_of: impl Fn(Uuid) -> String) -> String {
+    let mut mentions: Vec<(usize, usize, Uuid)> = mention_ranges(ranges).collect();
+    if mentions.is_empty() {
+        return body.to_string();
     }
-    if msg.sticker.is_some() {
-        return "Sticker".to_string();
+    let mut units: Vec<u16> = body.encode_utf16().collect();
+    // Splice from the end so earlier offsets stay valid.
+    mentions.sort_by(|a, b| b.0.cmp(&a.0));
+    for (start, len, aci) in mentions {
+        let end = start + len;
+        if len == 0 || end > units.len() {
+            continue;
+        }
+        let label: Vec<u16> = format!("@{}", name_of(aci)).encode_utf16().collect();
+        units.splice(start..end, label);
     }
-    String::new()
+    String::from_utf16_lossy(&units)
+}
+
+/// Accounts mentioned in the message body.
+pub fn mentioned_acis(content: &Content) -> Vec<Uuid> {
+    data_message_of(content)
+        .map(|msg| mention_ranges(&msg.body_ranges).map(|(_, _, aci)| aci).collect())
+        .unwrap_or_default()
+}
+
+/// Names for the accounts mentioned in `content`, looked up in the contact store.
+pub async fn mention_names<S: Store>(
+    manager: &Manager<S, Registered>,
+    content: &Content,
+) -> HashMap<Uuid, String> {
+    let mut names = HashMap::new();
+    for aci in mentioned_acis(content) {
+        names.insert(aci, lookup_contact_name(manager, aci).await);
+    }
+    names
+}
+
+pub fn name_or_uuid(names: &HashMap<Uuid, String>, uuid: Uuid) -> String {
+    names.get(&uuid).cloned().unwrap_or_else(|| uuid.to_string())
 }
 
 /// Look up a contact's display name by UUID; falls back to the UUID string.
@@ -724,42 +786,32 @@ pub async fn load_sender_names<S: Store>(
     map
 }
 
-/// Extract (target_sent_timestamp, new_body) from an EditMessage or a SyncMessage
-/// wrapping an edit (sent by us on another device). Returns None for all other content.
-fn extract_edit(content: &Content) -> Option<(u64, String)> {
-    match &content.body {
-        ContentBody::EditMessage(EditMessage {
-            target_sent_timestamp: Some(ts),
-            data_message: Some(dm),
-        }) => Some((*ts, data_message_body(dm))),
+/// Extract (target_sent_timestamp, edited DataMessage) from an EditMessage or a
+/// SyncMessage wrapping an edit sent by us on another device.
+fn extract_edit(content: &Content) -> Option<(u64, DataMessage)> {
+    let edit = match &content.body {
+        ContentBody::EditMessage(edit) => edit,
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent {
-                edit_message: Some(EditMessage {
-                    target_sent_timestamp: Some(ts),
-                    data_message: Some(dm),
-                }),
-                ..
-            }),
+            sent: Some(Sent { edit_message: Some(edit), .. }),
             ..
-        }) => Some((*ts, data_message_body(dm))),
-        _ => None,
-    }
+        }) => edit,
+        _ => return None,
+    };
+    Some((edit.target_sent_timestamp?, edit.data_message.clone()?))
 }
 
-/// Replace the body text of a DataMessage or SyncMessage in-place.
-fn apply_edit_body(content: &mut Content, new_body: &str) {
-    match &mut content.body {
-        ContentBody::DataMessage(dm) => {
-            dm.body = Some(new_body.to_string());
-        }
+/// Replace the text of a message with its edited version, mentions included.
+fn apply_edit(content: &mut Content, edited: &DataMessage) {
+    let msg = match &mut content.body {
+        ContentBody::DataMessage(msg) => msg,
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { message: Some(dm), .. }),
+            sent: Some(Sent { message: Some(msg), .. }),
             ..
-        }) => {
-            dm.body = Some(new_body.to_string());
-        }
-        _ => {}
-    }
+        }) => msg,
+        _ => return,
+    };
+    msg.body = edited.body.clone();
+    msg.body_ranges = edited.body_ranges.clone();
 }
 
 /// Single-pass load: splits the thread's message store into displayable messages
@@ -779,16 +831,16 @@ pub async fn load_messages_and_reactions<S: Store>(
 
     let mut messages: Vec<Content> = Vec::new();
     let mut events: Vec<(u64, [u8; 16], String, bool, u64)> = Vec::new();
-    // target_sent_timestamp → latest edited body. Store returns DESC, so the first
+    // target_sent_timestamp → latest edit. Store returns DESC, so the first
     // EditMessage seen for a given target is the most recent edit.
-    let mut edits: HashMap<u64, String> = HashMap::new();
+    let mut edits: HashMap<u64, DataMessage> = HashMap::new();
 
     for result in iter {
         let Ok(content) = result else { continue };
 
         // Collect edit messages; they replace the original rather than appearing standalone.
-        if let Some((target_ts, new_body)) = extract_edit(&content) {
-            edits.entry(target_ts).or_insert(new_body);
+        if let Some((target_ts, edited)) = extract_edit(&content) {
+            edits.entry(target_ts).or_insert(edited);
             continue;
         }
 
@@ -818,7 +870,7 @@ pub async fn load_messages_and_reactions<S: Store>(
                     target_ts,
                 ));
             }
-        } else if !message_body(&content).is_empty() {
+        } else if !message_body(&content, |u| u.to_string()).is_empty() {
             messages.push(content);
         }
     }
@@ -829,8 +881,8 @@ pub async fn load_messages_and_reactions<S: Store>(
 
     // Apply edits in-place: replace the body of the original message.
     for msg in &mut messages {
-        if let Some(new_body) = edits.get(&msg.timestamp()) {
-            apply_edit_body(msg, new_body);
+        if let Some(edited) = edits.get(&msg.timestamp()) {
+            apply_edit(msg, edited);
         }
     }
 
@@ -962,20 +1014,17 @@ pub async fn send_reply<S: Store>(
     dispatch_send(manager, thread, data_message, ts).await
 }
 
-/// Returns the (author_uuid, first_line_of_text) for the quoted message, if any.
-pub fn message_quote(content: &Content) -> Option<(Uuid, String)> {
-    let quote = match &content.body {
-        ContentBody::DataMessage(msg) => msg.quote.as_ref()?,
-        _ => return None,
-    };
+/// Author and text of the message a reply quotes, mentions rendered via `name_of`.
+pub fn message_quote(content: &Content, name_of: impl Fn(Uuid) -> String) -> Option<(Uuid, String)> {
+    let quote = data_message_of(content)?.quote.as_ref()?;
     // Prefer the binary ACI field; fall back to the string form.
     let author = if let Some(bytes) = &quote.author_aci_binary {
         Uuid::from_slice(bytes).ok()?
     } else {
         Uuid::parse_str(quote.author_aci.as_deref()?).ok()?
     };
-    let text = quote.text.clone().unwrap_or_default();
-    Some((author, text))
+    let text = quote.text.as_deref().unwrap_or_default();
+    Some((author, substitute_mentions(text, &quote.body_ranges, name_of)))
 }
 
 /// Returns (delivered_timestamps, read_timestamps) for our sent messages in this thread.
@@ -1122,4 +1171,83 @@ pub(crate) fn fmt_ts_long(ts_ms: u64) -> String {
     ts_to_datetime(ts_ms)
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alice() -> Uuid {
+        Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
+    }
+
+    fn bob() -> Uuid {
+        Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()
+    }
+
+    fn mention(start: u32, aci: Uuid) -> BodyRange {
+        BodyRange {
+            start: Some(start),
+            length: Some(1),
+            associated_value: Some(AssociatedValue::MentionAci(aci.to_string())),
+        }
+    }
+
+    fn names(uuid: Uuid) -> String {
+        if uuid == alice() {
+            "Alice".to_string()
+        } else if uuid == bob() {
+            "Bob".to_string()
+        } else {
+            uuid.to_string()
+        }
+    }
+
+    #[test]
+    fn substitutes_placeholder_with_name() {
+        let out = substitute_mentions("\u{FFFC} hi", &[mention(0, alice())], names);
+        assert_eq!(out, "@Alice hi");
+    }
+
+    #[test]
+    fn offsets_are_utf16_units() {
+        // 😀 is two UTF-16 code units, so the placeholder sits at index 3.
+        let out = substitute_mentions("😀 \u{FFFC}!", &[mention(3, alice())], names);
+        assert_eq!(out, "😀 @Alice!");
+    }
+
+    #[test]
+    fn multiple_mentions_in_any_order() {
+        let body = "\u{FFFC} and \u{FFFC}";
+        let ranges = [mention(0, alice()), mention(6, bob())];
+        assert_eq!(substitute_mentions(body, &ranges, names), "@Alice and @Bob");
+        let reversed = [mention(6, bob()), mention(0, alice())];
+        assert_eq!(substitute_mentions(body, &reversed, names), "@Alice and @Bob");
+    }
+
+    #[test]
+    fn out_of_range_mention_is_ignored() {
+        let out = substitute_mentions("x", &[mention(5, alice())], names);
+        assert_eq!(out, "x");
+    }
+
+    #[test]
+    fn binary_aci_is_accepted() {
+        let range = BodyRange {
+            start: Some(0),
+            length: Some(1),
+            associated_value: Some(AssociatedValue::MentionAciBinary(bob().as_bytes().to_vec())),
+        };
+        assert_eq!(substitute_mentions("\u{FFFC}", &[range], names), "@Bob");
+    }
+
+    #[test]
+    fn style_ranges_are_not_mentions() {
+        let range = BodyRange {
+            start: Some(0),
+            length: Some(4),
+            associated_value: Some(AssociatedValue::Style(1)),
+        };
+        assert_eq!(substitute_mentions("bold", &[range], names), "bold");
+    }
 }

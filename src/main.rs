@@ -358,7 +358,7 @@ async fn run<S: Store>(
                     let ts = boxed.timestamp();
                     if ts < start_ts { continue; }
                     if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) { continue; }
-                    let body = signal::message_body(&boxed);
+                    let body = resolved_body(&mut names, &manager, &boxed).await;
                     if body.is_empty() { continue; }
                     // Evict timestamps older than 60 s to keep the dedup set bounded.
                     let horizon = ts.saturating_sub(60_000);
@@ -423,6 +423,18 @@ async fn cached_sender_name<S: Store>(
     name
 }
 
+/// Message text with mentioned accounts resolved to names through the shared cache.
+async fn resolved_body<S: Store>(
+    cache: &mut std::collections::HashMap<Uuid, String>,
+    manager: &Manager<S, Registered>,
+    content: &Content,
+) -> String {
+    for aci in signal::mentioned_acis(content) {
+        cached_sender_name(cache, manager, aci).await;
+    }
+    signal::message_body(content, |u| signal::name_or_uuid(cache, u))
+}
+
 async fn print_messages<S: Store>(
     manager: &Manager<S, Registered>,
     messages: &[Content],
@@ -432,7 +444,7 @@ async fn print_messages<S: Store>(
     for msg in messages {
         let uuid = msg.metadata.sender.raw_uuid();
         let sender_name = cached_sender_name(&mut names, manager, uuid).await;
-        let body = signal::message_body(msg);
+        let body = resolved_body(&mut names, manager, msg).await;
         println!("{}", format_one(format, msg.timestamp(), uuid, &sender_name, &body));
     }
 }

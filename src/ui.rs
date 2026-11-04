@@ -287,7 +287,9 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
 
         // Quote block (reply preview), rendered before the body
-        if let Some((q_author_uuid, q_text)) = signal::message_quote(content) {
+        if let Some((q_author_uuid, q_text)) =
+            signal::message_quote(content, |u| chat.display_name(u, own_aci))
+        {
             let q_author = if own_aci == Some(q_author_uuid) {
                 "You".to_string()
             } else if is_group {
@@ -305,7 +307,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
         // Message body — word-wrapped; indent each wrapped line.
         // Append ✓/✓✓ receipt indicator on the very last wrapped line of own messages.
-        let body = signal::message_body(content);
+        let body = signal::message_body(content, |u| chat.display_name(u, own_aci));
         let receipt = if is_own {
             receipt_indicator(&chat.read, &chat.delivered, ts)
         } else {
