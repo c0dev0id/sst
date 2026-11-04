@@ -82,6 +82,7 @@ pub enum AppCmd {
 pub struct App {
     pub threads: Vec<ThreadEntry>,
     pub list_state: ListState,
+    pub status: Option<String>, // message shown on the list/contact status bar until the next key
     pub quit: bool,
     pub view: View,
     pub chat: Option<ChatState>,
@@ -101,6 +102,7 @@ impl App {
         Self {
             threads,
             list_state,
+            status: None,
             quit: false,
             view: View::ChatList,
             chat: None,
@@ -178,7 +180,18 @@ impl App {
         }
     }
 
+    /// Show a failed command's error where the user is looking, and log it.
+    pub fn show_error(&mut self, err: &anyhow::Error) {
+        tracing::warn!("{err:#}");
+        let text = format!("{err:#}");
+        match &mut self.chat {
+            Some(chat) => chat.autocomplete_hint = Some(text),
+            None => self.status = Some(text),
+        }
+    }
+
     fn on_key_list(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
+        self.status = None;
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => { self.quit = true; None }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -501,6 +514,7 @@ impl App {
     }
 
     fn on_key_contacts(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
+        self.status = None;
         // Whether a separator row exists between contacts and groups.
         let has_sep = self.contacts_split > 0 && self.contacts_split < self.contacts.len();
         let total = self.contacts.len() + if has_sep { 1 } else { 0 };
@@ -926,10 +940,7 @@ async fn execute_cmd<S: Store>(
                 Vec::new()
             } else {
                 match signal::upload_staged_attachments(manager, &staged).await {
-                    Ok(pts) => {
-                        chat.selected_attachment = None;
-                        pts
-                    }
+                    Ok(pts) => pts,
                     Err((msg, failed_path)) => {
                         chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
                         if let Some(sel) = chat.selected_attachment {
@@ -942,25 +953,38 @@ async fn execute_cmd<S: Store>(
                 }
             };
 
-            let quoted = chat.reply_to.take().and_then(|idx| chat.messages.get(idx)).map(signal::quote_ref);
-            let editing = chat.editing.take();
+            let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_ref);
+            let targeted = chat.editing.is_some() || quoted.is_some();
             let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
-            chat.input.clear();
-            chat.cursor = 0;
             if text.is_empty() && pointers.is_empty() {
                 return Ok(());
             }
 
-            if let Some((_idx, edit_ts)) = editing {
-                signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await?;
-                chat.selected_message = None;
+            let sent = if let Some((_idx, edit_ts)) = chat.editing {
+                signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await
             } else if let Some(quoted) = quoted {
-                signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await?;
-                chat.selected_message = None;
+                signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await
             } else {
-                signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await?;
+                signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await
+            };
+            match sent {
+                Ok(()) => {
+                    chat.input.clear();
+                    chat.cursor = 0;
+                    chat.reply_to = None;
+                    chat.editing = None;
+                    chat.selected_attachment = None;
+                    if targeted {
+                        chat.selected_message = None;
+                    }
+                    reload_chat(manager, &thread, &mut app.chat).await;
+                }
+                Err(e) => {
+                    // Keep the draft and put the files back so a retry re-uploads them.
+                    chat.staged_attachments = staged;
+                    chat.autocomplete_hint = Some(format!("send failed: {e:#}"));
+                }
             }
-            reload_chat(manager, &thread, &mut app.chat).await;
         }
         AppCmd::ExecCmd(cmd_text) => {
             let colon_input = format!(":{}", cmd_text);
@@ -1226,8 +1250,10 @@ pub async fn run<S: Store>(
                 event = events.next() => {
                     match event {
                         Some(Ok(Event::Key(key))) => {
-                            if let Some(cmd) = app.on_key(key) {
-                                execute_cmd(&mut app, &mut manager, cmd, &mut terminal).await?;
+                            if let Some(cmd) = app.on_key(key)
+                                && let Err(e) = execute_cmd(&mut app, &mut manager, cmd, &mut terminal).await
+                            {
+                                app.show_error(&e);
                             }
                         }
                         Some(Ok(Event::Paste(text))) => {

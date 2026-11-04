@@ -26,7 +26,13 @@ fn draw_chat_list_screen(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
     draw_thread_list(f, app, chunks[0]);
-    draw_status_bar(f, chunks[1], "  j/k/↑↓ navigate   PgUp/PgDn scroll   l/Enter/→ open   n new chat   Q quit");
+    let text = status_or(app, "  j/k/↑↓ navigate   PgUp/PgDn scroll   l/Enter/→ open   n new chat   Q quit");
+    draw_status_bar(f, chunks[1], &text);
+}
+
+/// The pending status message if there is one, otherwise the key hint.
+fn status_or(app: &App, hint: &str) -> String {
+    app.status.as_ref().map_or_else(|| hint.to_string(), |s| format!("  {s}"))
 }
 
 fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -83,7 +89,8 @@ fn draw_contact_browser_screen(f: &mut Frame, app: &mut App) {
     f.render_widget(header, chunks[0]);
 
     draw_contact_list(f, app, chunks[1]);
-    draw_status_bar(f, chunks[2], "  j/k/↑↓ navigate   PgUp/PgDn scroll   l/Enter open   h/Esc back");
+    let text = status_or(app, "  j/k/↑↓ navigate   PgUp/PgDn scroll   l/Enter open   h/Esc back");
+    draw_status_bar(f, chunks[2], &text);
 }
 
 fn draw_contact_list(f: &mut Frame, app: &mut App, area: Rect) {

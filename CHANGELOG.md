@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
 ### Fixed
+- A Signal error while sending, reacting, deleting or opening a chat is shown on the status bar instead of terminating the TUI. A failed send keeps the draft, its reply or edit target and its attachments for a retry.
 - A failed attachment upload no longer discards the typed message, reply target or edit in progress; only the failed file is removed from the attachment bar.
 - Quote previews in group chats show the quoted author's name instead of a UUID.
 - Replying to a photo, file or sticker quotes it as media, so the other side shows a media quote instead of the literal word "Attachment".
