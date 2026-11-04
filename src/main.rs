@@ -142,21 +142,24 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let data_dir = db_path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
 
-    // send/print/print-last are one-shot operations (pure reads or a single
-    // atomic DB write) that do not hold a persistent Signal WebSocket.  They
-    // are safe to run concurrently with the TUI or `sst watch`, so they skip
-    // the exclusive lock.  All other subcommands maintain persistent
-    // connections or sync session state and must hold the exclusive lock to
-    // prevent ratchet divergence.
-    let needs_lock = !matches!(
-        args.cmd,
-        Some(Cmd::Send { .. }) | Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. })
-    );
+    // Interactive and streaming subcommands need the Signal session to
+    // themselves. print and print-last take the lock when it is free so they
+    // can sync first; when another instance holds it, that instance keeps the
+    // store current and they read it as is. send never takes the lock so a
+    // script can reply while `sst watch` streams.
+    let lock_mode = match args.cmd {
+        Some(Cmd::Send { .. }) => LockMode::Never,
+        Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. }) => LockMode::IfFree,
+        _ => LockMode::Required,
+    };
 
     // lock_holder must live at the same scope as _lock_guard so the guard's
     // borrow into it stays valid for the whole run_inner call.
     let mut lock_holder: fd_lock::RwLock<std::fs::File>;
-    let _lock_guard = if needs_lock {
+    let mut holds_lock = false;
+    let _lock_guard = if lock_mode == LockMode::Never {
+        None
+    } else {
         let lock_file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -164,16 +167,19 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             .open(data_dir.join("sst.lock"))
             .context("failed to open lock file")?;
         lock_holder = fd_lock::RwLock::new(lock_file);
-        Some(lock_holder.try_write().map_err(|_| {
-            anyhow::anyhow!(
+        match lock_holder.try_write() {
+            Ok(guard) => {
+                holds_lock = true;
+                Some(guard)
+            }
+            Err(_) if lock_mode == LockMode::IfFree => None,
+            Err(_) => anyhow::bail!(
                 "another sst instance is already running\n\
                  (only one instance may use the Signal session at a time)"
-            )
-        })?)
-    } else {
-        None
+            ),
+        }
     };
-    match run_inner(args.cmd, db_path, data_dir).await {
+    match run_inner(args.cmd, db_path, data_dir, holds_lock).await {
         Ok(()) => Ok(()),
         Err(e) => {
             if let Some(hint) = signal::relink_hint(&e) {
@@ -186,7 +192,16 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     }
 }
 
-async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
+#[derive(Clone, Copy, PartialEq)]
+enum LockMode {
+    Required,
+    IfFree,
+    Never,
+}
+
+/// `may_sync`: whether this process holds the instance lock and may therefore
+/// drain the message queue before reading the store.
+async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf, may_sync: bool) -> anyhow::Result<()> {
     if matches!(cmd, Some(Cmd::Link)) {
         if db_path.exists() {
             eprintln!("Warning: this will wipe the local database at {}", db_path.display());
@@ -230,13 +245,14 @@ async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> any
     .context("failed to open store")?;
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(run(cmd, store, data_dir)).await
+    local.run_until(run(cmd, store, data_dir, may_sync)).await
 }
 
 async fn run<S: Store>(
     cmd: Option<Cmd>,
     store: S,
     data_dir: PathBuf,
+    may_sync: bool,
 ) -> anyhow::Result<()> {
     let mut manager = if matches!(cmd, Some(Cmd::Link)) {
         link_device(store).await?
@@ -320,7 +336,9 @@ async fn run<S: Store>(
         }
 
         Some(Cmd::Print { format, recipient }) => {
-            signal::sync(&mut manager, &mut state).await?;
+            if may_sync {
+                signal::sync(&mut manager, &mut state).await?;
+            }
             let thread = parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             print_messages(&mut manager, &thread, &messages, &format).await;
@@ -328,7 +346,9 @@ async fn run<S: Store>(
         }
 
         Some(Cmd::PrintLast { count, format, recipient }) => {
-            signal::sync(&mut manager, &mut state).await?;
+            if may_sync {
+                signal::sync(&mut manager, &mut state).await?;
+            }
             let thread = parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             let start = messages.len().saturating_sub(count);
