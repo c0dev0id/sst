@@ -1123,22 +1123,37 @@ pub async fn send_reaction<S: Store>(
     dispatch_send(manager, thread, data_message, ts).await
 }
 
+/// Signal accepts edits and delete-for-everyone for 24 hours after sending.
+pub fn outside_edit_window(sent_ts: u64) -> bool {
+    const WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+    now_millis().is_ok_and(|now| now.saturating_sub(sent_ts) > WINDOW_MS)
+}
+
+/// Replace the text of `original`. An edit carries the whole message again, so
+/// the quote and attachments are copied; presage fills the thread's expire
+/// timer for DataMessage bodies only, so it is copied here as well.
 pub async fn send_edit<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
-    target_ts: u64,
+    original: &Content,
     body: String,
     body_ranges: Vec<BodyRange>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
+    let previous = data_message_of(original);
+    let timer = manager.store().expire_timer(thread).await.ok().flatten();
     let data_message = DataMessage {
         body: Some(body),
         body_ranges,
         timestamp: Some(ts),
+        quote: previous.and_then(|m| m.quote.clone()),
+        attachments: previous.map(|m| m.attachments.clone()).unwrap_or_default(),
+        expire_timer: timer.and_then(|(secs, _)| (secs > 0).then_some(secs)),
+        expire_timer_version: Some(timer.map_or(0, |(_, version)| version)),
         ..Default::default()
     };
     let edit = ContentBody::EditMessage(EditMessage {
-        target_sent_timestamp: Some(target_ts),
+        target_sent_timestamp: Some(original.timestamp()),
         data_message: Some(data_message),
     });
     dispatch_send_body(manager, thread, edit, ts).await

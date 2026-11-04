@@ -317,17 +317,20 @@ impl App {
                             if let Some(content) = chat.messages.get(sel_idx) {
                                 let is_own = own_aci
                                     .is_some_and(|a| a == content.metadata.sender.raw_uuid());
-                                if is_own {
-                                    let ts = content.timestamp();
+                                let ts = content.timestamp();
+                                if !is_own {
+                                    chat.autocomplete_hint =
+                                        Some("can only edit own messages".to_string());
+                                } else if signal::outside_edit_window(ts) {
+                                    chat.autocomplete_hint =
+                                        Some("can only edit messages from the last 24 hours".to_string());
+                                } else {
                                     // Roster names only: a label like "Attachment" or "You" would be sent as text.
                                     let body = signal::message_text(content, |u| signal::name_or_uuid(&chat.sender_names, u));
                                     chat.input = body;
                                     chat.cursor = chat.input.len();
                                     chat.editing = Some(ts);
                                     chat.mode = Mode::Insert;
-                                } else {
-                                    chat.autocomplete_hint =
-                                        Some("can only edit own messages".to_string());
                                 }
                             }
                         } else {
@@ -350,14 +353,23 @@ impl App {
                                 chat.pending_d = true;
                                 chat.autocomplete_hint = Some("d again to remove attachment".to_string());
                             }
-                        } else if chat.selected_message.is_none() {
-                            chat.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
-                        } else if chat.pending_d {
-                            chat.pending_d = false;
-                            return Some(AppCmd::DeleteMessage);
+                        } else if let Some(content) = chat.selected_message.and_then(|i| chat.messages.get(i)) {
+                            let is_own = own_aci.is_some_and(|a| a == content.metadata.sender.raw_uuid());
+                            let ts = content.timestamp();
+                            if !is_own {
+                                chat.autocomplete_hint = Some("can only delete own messages".to_string());
+                            } else if signal::outside_edit_window(ts) {
+                                chat.autocomplete_hint =
+                                    Some("can only delete messages from the last 24 hours".to_string());
+                            } else if chat.pending_d {
+                                chat.pending_d = false;
+                                return Some(AppCmd::DeleteMessage);
+                            } else {
+                                chat.pending_d = true;
+                                chat.autocomplete_hint = Some("d again to delete for everyone".to_string());
+                            }
                         } else {
-                            chat.pending_d = true;
-                            chat.autocomplete_hint = Some("d again to delete for everyone".to_string());
+                            chat.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -1016,7 +1028,10 @@ async fn execute_cmd<S: Store>(
             }
 
             let sent = if let Some(edit_ts) = chat.editing {
-                signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await
+                match chat.messages.iter().find(|m| m.timestamp() == edit_ts) {
+                    Some(original) => signal::send_edit(manager, &thread, original, text, body_ranges).await,
+                    None => Err(anyhow::anyhow!("the message being edited no longer exists")),
+                }
             } else if let Some(quoted) = quoted {
                 signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await
             } else {
@@ -1224,7 +1239,8 @@ async fn execute_cmd<S: Store>(
             }
         }
         AppCmd::DeleteMessage => {
-            let (thread, timestamp, sel_idx, is_own) = match app.chat.as_ref() {
+            // Ownership and age were checked when the second d was pressed.
+            let (thread, timestamp, sel_idx) = match app.chat.as_ref() {
                 Some(chat) => {
                     let idx = match chat.selected_message {
                         Some(i) => i,
@@ -1234,18 +1250,10 @@ async fn execute_cmd<S: Store>(
                         Some(m) => m,
                         None => return Ok(()),
                     };
-                    let own = app.own_aci
-                        .is_some_and(|a| a == msg.metadata.sender.raw_uuid());
-                    (chat.thread.clone(), msg.timestamp(), idx, own)
+                    (chat.thread.clone(), msg.timestamp(), idx)
                 }
                 None => return Ok(()),
             };
-            if !is_own {
-                if let Some(chat) = &mut app.chat {
-                    chat.autocomplete_hint = Some("can only delete own messages".to_string());
-                }
-                return Ok(());
-            }
             signal::delete_for_everyone(manager, &thread, timestamp).await?;
             if let Some(chat) = &mut app.chat {
                 let mut remaining = std::mem::take(&mut chat.messages);
