@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
 ### Fixed
+- Esc in Insert mode cancels the pending edit or reply as the status bar states; previously the edit or reply stayed armed and the next Enter sent it. Editing a photo or file message starts with an empty caption instead of the word "Attachment".
 - In group chats the status bar names the selected message's author and the member being replied to; it showed the group's name.
 - The selected message and the reply target stay on the same message when the chat reloads after a remote delete or an out-of-order delivery; previously they silently moved to a neighbouring message.
 - Unread markers: messages sent from another of your devices, and messages arriving in the chat you are viewing, no longer mark the thread unread. Opening a chat clears its marker, and returning to the chat list keeps the others. A first message from an unlisted contact or group adds the thread under its real name instead of a UUID or not at all.

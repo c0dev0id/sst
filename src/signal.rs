@@ -668,6 +668,15 @@ pub fn message_body(content: &Content, name_of: impl Fn(Uuid) -> String) -> Stri
     }
 }
 
+/// The message's text with mentions rendered, or empty when it has no text.
+pub fn message_text(content: &Content, name_of: impl Fn(Uuid) -> String) -> String {
+    let Some(msg) = data_message_of(content) else { return String::new() };
+    match msg.body.as_deref() {
+        Some(text) if !text.is_empty() => substitute_mentions(text, &msg.body_ranges, name_of),
+        _ => String::new(),
+    }
+}
+
 fn data_message_body(msg: &DataMessage, name_of: impl Fn(Uuid) -> String) -> String {
     match msg.body.as_deref() {
         Some(text) if !text.is_empty() => substitute_mentions(text, &msg.body_ranges, name_of),

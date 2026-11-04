@@ -316,7 +316,8 @@ impl App {
                                     .is_some_and(|a| a == content.metadata.sender.raw_uuid());
                                 if is_own {
                                     let ts = content.timestamp();
-                                    let body = signal::message_body(content, |u| chat.display_name(u, own_aci));
+                                    // Roster names only: a label like "Attachment" or "You" would be sent as text.
+                                    let body = signal::message_text(content, |u| signal::name_or_uuid(&chat.sender_names, u));
                                     chat.input = body;
                                     chat.cursor = chat.input.len();
                                     chat.editing = Some(ts);
@@ -406,6 +407,12 @@ impl App {
             Mode::Insert => { // Insert mode
                 match key.code {
                     KeyCode::Esc => {
+                        // Cancels a pending edit or reply, as the status bar says it does.
+                        if chat.editing.take().is_some() {
+                            chat.input.clear();
+                            chat.cursor = 0;
+                        }
+                        chat.reply_to = None;
                         chat.mode = Mode::Normal;
                     }
                     KeyCode::Left => {
