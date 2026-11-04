@@ -16,7 +16,6 @@
 - [ ] `Received::Contacts` arriving mid-session is ignored; names refresh on restart only.
 - [ ] Signal caps edits at 10 per message; sst enforces the 24-hour window only.
 - [ ] `print --format=json` carries no quote, reactions or attachments; `print` does not mark edited messages.
-- [ ] `sst send` runs without the instance lock so a script can reply beside `sst watch`. Both write ratchet state; the window is short but real. A daemon with a send socket would close it.
 
 ### Thread management
 - [ ] `d` key on the chat list to delete a thread, with confirmation (chat-window `dd` delete-for-everyone already exists; this is list-level thread deletion)

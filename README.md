@@ -33,7 +33,7 @@ send, and script Signal messages without a desktop GUI.
    **Signal → Settings → Linked Devices → Link New Device**.
 3. Run `sst` to open the TUI.
 
-Data lives in `~/.local/share/sst` (store, session keys, `sst.log`). Set
+Data lives in `~/.local/share/sst` (store, session keys, `sst.log`, the `sst.sock` send socket). Set
 `RUST_LOG=debug` for verbose logging.
 
 ## Keybindings
@@ -66,8 +66,10 @@ discards. Command mode: `:react <emoji>` (raw emoji or gemoji shortcode like
 
 ## CLI
 
-`sst` runs non-interactively for scripting. `send`, `print`, and `print-last` can run
-alongside the TUI; other subcommands hold an exclusive lock.
+`sst` runs non-interactively for scripting. `send` hands the message to a running
+TUI or `watch` over a local socket, or sends directly when nothing else is running.
+`print` and `print-last` read the local store beside a running instance; other
+subcommands hold an exclusive lock.
 
 | Command | Description |
 |---------|-------------|

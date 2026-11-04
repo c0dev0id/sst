@@ -129,7 +129,7 @@ The old CLI used ad-hoc boolean flags (`--list`, `--send`, `--read-stream`, etc.
 
 Global `--db <path>` overrides the store location for all subcommands.
 
-Lock modes: interactive and streaming subcommands require the instance lock and fail if it is held. `print` and `print-last` take it when free so they can sync first; when another instance holds it they read the store as is, since that instance keeps it current. `send` never takes it so a script can reply while `sst watch` streams; both write ratchet state, so that race is accepted rather than solved (see TODO).
+Lock modes: interactive and streaming subcommands require the instance lock and fail if it is held. `print` and `print-last` take it when free so they can sync first; when another instance holds it they read the store as is, since that instance keeps it current. `send` goes through the send socket (below) and takes the lock only for a direct send when no instance is running.
 
 `--format=json` outputs one JSON object per line (NDJSON). `--format=text` (default) outputs human-readable lines. `Format` uses `#[derive(ValueEnum)]` with `impl Display` so clap can display the default in `--help`. PascalCase variants become kebab-case automatically (`PrintLast` → `print-last`).
 
@@ -185,6 +185,21 @@ them up front instead of applying them locally and diverging.
 `execute_cmd` errors are shown on the status bar and logged; they never propagate out
 of the event loop. A send consumes the draft only after the send succeeds, so a
 failed upload or send leaves text, reply or edit target and files in place.
+
+### Send socket
+
+Two processes must never write ratchet state at the same time, yet a script wants
+to reply while `sst watch` streams or the TUI is open. The process holding the
+session (TUI or `watch`) therefore listens on `sst.sock` in the data directory and
+performs sends on behalf of `sst send`, which is a thin client: one JSON request
+per connection, one JSON reply, attachment paths made absolute by the client. When
+no holder is listening, `send` takes the instance lock and sends directly; while a
+holder is starting up or a short-lived subcommand has the lock, it retries both for
+up to 30 seconds. The holder owns the lock, so a socket file left by a crash is
+known to be stale and is replaced on bind. The socket is mode 0600; anyone who can
+connect can send as the user. A separate daemon process was rejected: it would add
+a service to manage without removing a code path, since the TUI and `watch`
+already hold the session.
 
 ## Core Features
 
