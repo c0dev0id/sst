@@ -290,10 +290,8 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         if let Some((q_author_uuid, q_text)) =
             signal::message_quote(content, |u| chat.display_name(u, own_aci))
         {
-            let q_author = if own_aci == Some(q_author_uuid) {
-                "You".to_string()
-            } else if is_group {
-                q_author_uuid.to_string()
+            let q_author = if is_group || own_aci == Some(q_author_uuid) {
+                chat.display_name(q_author_uuid, own_aci)
             } else {
                 thread_name.clone()
             };
