@@ -68,7 +68,7 @@ discards. Command mode: `:react <emoji>` (raw emoji or gemoji shortcode like
 
 `sst` runs non-interactively for scripting. `send` hands the message to a running
 TUI or `watch` over a local socket, or sends directly when nothing else is running.
-`chats`, `contacts`, `print` and `print-last` read the local store beside a running
+`chats`, `contacts`, `print`, `print-last` and `recent` read the local store beside a running
 instance and sync first when nothing else is running; `watch` holds the session.
 
 | Command | Description |
@@ -78,6 +78,7 @@ instance and sync first when nothing else is running; `watch` holds the session.
 | `sst contacts` | List known contacts and groups |
 | `sst print <ID>` | Print full chat history |
 | `sst print-last [-n N] <ID>` | Print the last N messages |
+| `sst recent [--since WHEN] [--mentions-me] [-n N]` | Messages from others across all chats since a time (default 24h); `--mentions-me` keeps only @-mentions of you |
 | `sst watch <ID>` | Stream new incoming messages |
 | `sst send <ID> [TEXT] [--attach PATH]…` | Send a message (text or stdin) |
 

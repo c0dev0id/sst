@@ -90,6 +90,24 @@ enum Cmd {
         recipient: String,
     },
 
+    /// List messages from others across all chats since a point in time
+    Recent {
+        /// RFC 3339 timestamp, or a duration back from now like 30m, 2h, 7d
+        #[clap(long, default_value = "24h", value_name = "WHEN")]
+        since: String,
+
+        /// Only messages that @-mention this account
+        #[clap(long)]
+        mentions_me: bool,
+
+        /// Keep only the newest N messages
+        #[clap(short = 'n', long, default_value = "200", value_name = "N")]
+        limit: usize,
+
+        #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
+        format: Format,
+    },
+
     /// Stream incoming messages (runs until interrupted)
     Watch {
         #[clap(long, value_enum, default_value_t = Format::Text, value_name = "FORMAT")]
@@ -190,7 +208,11 @@ fn open_lock_file(data_dir: &Path) -> anyhow::Result<fd_lock::RwLock<std::fs::Fi
 async fn run_locked(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
     let read_only_is_fine = matches!(
         cmd,
-        Some(Cmd::Chats { .. }) | Some(Cmd::Contacts { .. }) | Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. })
+        Some(Cmd::Chats { .. })
+            | Some(Cmd::Contacts { .. })
+            | Some(Cmd::Print { .. })
+            | Some(Cmd::PrintLast { .. })
+            | Some(Cmd::Recent { .. })
     );
     let mut lock = open_lock_file(&data_dir)?;
     let lock_guard = match lock.try_write() {
@@ -392,7 +414,7 @@ async fn run<S: Store>(
                 signal::sync(&mut manager, &mut state).await?;
             }
             let thread = signal::parse_thread_id(&recipient)?;
-            let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
+            let (messages, _) = signal::load_messages_and_reactions(&manager, &thread, None).await?;
             print_messages(&mut manager, &thread, &messages, &format).await;
             Ok(())
         }
@@ -402,9 +424,35 @@ async fn run<S: Store>(
                 signal::sync(&mut manager, &mut state).await?;
             }
             let thread = signal::parse_thread_id(&recipient)?;
-            let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
+            let (messages, _) = signal::load_messages_and_reactions(&manager, &thread, None).await?;
             let start = messages.len().saturating_sub(count);
             print_messages(&mut manager, &thread, &messages[start..], &format).await;
+            Ok(())
+        }
+
+        Some(Cmd::Recent { since, mentions_me, limit, format }) => {
+            if may_sync {
+                signal::sync(&mut manager, &mut state).await?;
+            }
+            let since_ms = signal::since_to_millis(&since, signal::now_millis()?)?;
+            let recent = signal::recent_messages(&mut manager, &state.data_dir, since_ms, mentions_me, limit).await?;
+            for m in &recent {
+                match format {
+                    Format::Text => {
+                        let mark = if m.mentions_me { "@ " } else { "" };
+                        println!("[{}] {}{} / {}: {}", signal::fmt_ts_long(m.ts), mark, m.thread_name, m.sender_name, m.body);
+                    }
+                    Format::Json => println!("{}", serde_json::json!({
+                        "timestamp":   iso_timestamp(m.ts),
+                        "chat_id":     thread_id_string(&m.thread),
+                        "chat_name":   m.thread_name,
+                        "sender_uuid": m.sender.to_string(),
+                        "sender_name": m.sender_name,
+                        "body":        m.body,
+                        "mentions_me": m.mentions_me,
+                    })),
+                }
+            }
             Ok(())
         }
 

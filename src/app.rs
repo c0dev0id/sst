@@ -40,7 +40,7 @@ pub struct ChatView {
 }
 
 async fn load_chat_view<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> anyhow::Result<ChatView> {
-    let (messages, reactions) = signal::load_messages_and_reactions(manager, thread).await?;
+    let (messages, reactions) = signal::load_messages_and_reactions(manager, thread, None).await?;
     let (delivered, read) = signal::load_receipt_state(manager, thread, &messages).await.unwrap_or_default();
     let expire_timer = signal::expire_timer(manager, thread).await;
     Ok(ChatView { messages, reactions, delivered, read, expire_timer })
@@ -988,7 +988,7 @@ async fn reload_chat<S: Store>(
     thread: &Thread,
     chat: &mut Option<ChatState>,
 ) {
-    if let Ok((msgs, rxns)) = signal::load_messages_and_reactions(manager, thread).await
+    if let Ok((msgs, rxns)) = signal::load_messages_and_reactions(manager, thread, None).await
         && let Some(c) = chat
     {
         c.set_messages(msgs);

@@ -124,12 +124,13 @@ The old CLI used ad-hoc boolean flags (`--list`, `--send`, `--read-stream`, etc.
 - `sst contacts [--format=text|json]` → list contacts + groups
 - `sst print [--format=text|json] <uuid>` → full message history
 - `sst print-last [-n N] [--format=text|json] <uuid>` → last N messages (default 1)
+- `sst recent [--since WHEN] [--mentions-me] [-n N] [--format=text|json]` → messages from others across all chats since a time; mentions are the structured Signal kind
 - `sst watch [--format=text|json] <uuid>` → stream incoming messages
 - `sst send <uuid> [text] [--attach <path>]…` → send; reads stdin if no positional text
 
 Global `--db <path>` overrides the store location for all subcommands.
 
-Lock modes: the TUI and `watch` require the instance lock and fail if it is held. `chats`, `contacts`, `print` and `print-last` take it when free so they can sync first; when another instance holds it they read the store as is, since that instance keeps it current. `send` goes through the send socket (below) and takes the lock only for a direct send when no instance is running.
+Lock modes: the TUI and `watch` require the instance lock and fail if it is held. `chats`, `contacts`, `print`, `print-last` and `recent` take it when free so they can sync first; when another instance holds it they read the store as is, since that instance keeps it current. `send` goes through the send socket (below) and takes the lock only for a direct send when no instance is running.
 
 `--format=json` outputs one JSON object per line (NDJSON). `--format=text` (default) outputs human-readable lines. `Format` uses `#[derive(ValueEnum)]` with `impl Display` so clap can display the default in `--help`. PascalCase variants become kebab-case automatically (`PrintLast` → `print-last`).
 

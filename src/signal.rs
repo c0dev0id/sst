@@ -491,6 +491,43 @@ pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Op
     Some(MessageUpdate { thread, sender, preview, ts, edit_of })
 }
 
+/// Every thread the store knows, with its display name: contacts, contacts
+/// seen only in message traffic, and groups.
+async fn known_threads<S: Store>(
+    manager: &Manager<S, Registered>,
+    data_dir: &Path,
+    own_aci: Option<Uuid>,
+) -> anyhow::Result<Vec<(Thread, String)>> {
+    let mut threads: Vec<(Thread, String)> = Vec::new();
+    let mut seen: HashSet<Uuid> = HashSet::new();
+
+    for result in manager.store().contacts().await? {
+        let contact = result?;
+        seen.insert(contact.uuid);
+        let name = if own_aci == Some(contact.uuid) {
+            "Note to Self".to_string()
+        } else {
+            or_uuid(contact_display_name(manager, &contact).await, contact.uuid)
+        };
+        threads.push((Thread::Contact(ServiceId::Aci(contact.uuid.into())), name));
+    }
+
+    for uuid_bytes in load_chunks::<16>(&data_dir.join("known_contacts")) {
+        let uuid = Uuid::from_bytes(uuid_bytes);
+        if !seen.insert(uuid) {
+            continue;
+        }
+        let name = or_uuid(lookup_contact_name(manager, uuid).await, uuid);
+        threads.push((Thread::Contact(ServiceId::Aci(uuid.into())), name));
+    }
+
+    for result in manager.store().groups().await? {
+        let (master_key, group) = result?;
+        threads.push((Thread::Group(master_key), group.title));
+    }
+    Ok(threads)
+}
+
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
 /// Sorted most-recent-first; threads with no messages are omitted.
 pub async fn list_threads<S: Store>(
@@ -499,50 +536,90 @@ pub async fn list_threads<S: Store>(
     own_aci: Option<Uuid>,
 ) -> anyhow::Result<Vec<ThreadEntry>> {
     let mut entries: Vec<ThreadEntry> = Vec::new();
-    let mut seen: HashSet<Uuid> = HashSet::new();
-
-    for result in manager.store().contacts().await? {
-        let contact = result?;
-        seen.insert(contact.uuid);
-        let service_id = ServiceId::Aci(contact.uuid.into());
-        let thread = Thread::Contact(service_id);
-        let name = if own_aci == Some(contact.uuid) {
-            "Note to Self".to_string()
-        } else {
-            or_uuid(contact_display_name(manager, &contact).await, contact.uuid)
-        };
+    for (thread, name) in known_threads(manager, data_dir, own_aci).await? {
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
             entries.push(ThreadEntry::new(thread, name, last_preview, last_ts));
         }
     }
-
-    for uuid_bytes in load_chunks::<16>(&data_dir.join("known_contacts")) {
-        let uuid = Uuid::from_bytes(uuid_bytes);
-        if seen.contains(&uuid) {
-            continue;
-        }
-        seen.insert(uuid);
-        let service_id = ServiceId::Aci(uuid.into());
-        let thread = Thread::Contact(service_id);
-        let name = or_uuid(lookup_contact_name(manager, uuid).await, uuid);
-        let (last_preview, last_ts) = last_message(manager, &thread).await;
-        if last_ts > 0 {
-            entries.push(ThreadEntry::new(thread, name, last_preview, last_ts));
-        }
-    }
-
-    for result in manager.store().groups().await? {
-        let (master_key, group) = result?;
-        let thread = Thread::Group(master_key);
-        let (last_preview, last_ts) = last_message(manager, &thread).await;
-        if last_ts > 0 {
-            entries.push(ThreadEntry::new(thread, group.title, last_preview, last_ts));
-        }
-    }
-
     sort_recent_first(&mut entries);
     Ok(entries)
+}
+
+/// A message from someone else, with the chat it was sent in.
+pub struct RecentMessage {
+    pub ts: u64,
+    pub thread: Thread,
+    pub thread_name: String,
+    pub sender: Uuid,
+    pub sender_name: String,
+    pub body: String,
+    pub mentions_me: bool,
+}
+
+/// Messages from other people across every thread since `since_ms`, oldest
+/// first, keeping the newest `limit`. `mentions_only` keeps only messages that
+/// @-mention this account.
+pub async fn recent_messages<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    data_dir: &Path,
+    since_ms: u64,
+    mentions_only: bool,
+    limit: usize,
+) -> anyhow::Result<Vec<RecentMessage>> {
+    let own = own_aci(manager);
+    let mut recent: Vec<RecentMessage> = Vec::new();
+    for (thread, thread_name) in known_threads(manager, data_dir, Some(own)).await? {
+        let (messages, _) = load_messages_and_reactions(manager, &thread, Some(since_ms)).await?;
+        let from_others: Vec<Content> = messages
+            .into_iter()
+            .filter(|m| !is_own(m, Some(own)))
+            .filter(|m| !mentions_only || mentioned_acis(m).contains(&own))
+            .collect();
+        if from_others.is_empty() {
+            continue;
+        }
+        let wanted: HashSet<Uuid> = from_others
+            .iter()
+            .flat_map(|m| std::iter::once(m.metadata.sender.raw_uuid()).chain(mentioned_acis(m)))
+            .collect();
+        let names = load_sender_names(manager, &thread, None, Some(&wanted)).await;
+        for message in from_others {
+            let sender = message.metadata.sender.raw_uuid();
+            recent.push(RecentMessage {
+                ts: message.timestamp(),
+                thread: thread.clone(),
+                thread_name: thread_name.clone(),
+                sender,
+                sender_name: name_or_uuid(&names, sender),
+                body: message_body(&message, |u| name_or_uuid(&names, u)),
+                mentions_me: mentioned_acis(&message).contains(&own),
+            });
+        }
+    }
+    recent.sort_by_key(|m| m.ts);
+    if recent.len() > limit {
+        recent.drain(..recent.len() - limit);
+    }
+    Ok(recent)
+}
+
+/// A `--since` value as unix milliseconds: an RFC 3339 timestamp, or a
+/// duration back from `now_ms` such as `30m`, `2h` or `7d`.
+pub fn since_to_millis(spec: &str, now_ms: u64) -> anyhow::Result<u64> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(spec) {
+        return u64::try_from(dt.timestamp_millis()).context("timestamp before 1970");
+    }
+    let invalid = || anyhow::anyhow!("invalid --since '{spec}': use an RFC 3339 timestamp or a duration like 30m, 2h, 7d");
+    let unit = spec.chars().last().ok_or_else(invalid)?;
+    let amount: u64 = spec[..spec.len() - unit.len_utf8()].parse().map_err(|_| invalid())?;
+    let unit_ms: u64 = match unit {
+        'm' => 60_000,
+        'h' => 3_600_000,
+        'd' => 86_400_000,
+        _ => return Err(invalid()),
+    };
+    Ok(now_ms.saturating_sub(amount.saturating_mul(unit_ms)))
 }
 
 /// Load every contact and group regardless of message history.
@@ -1077,10 +1154,11 @@ fn apply_edit(content: &mut Content, edited: &DataMessage) {
 pub async fn load_messages_and_reactions<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
+    since: Option<u64>,
 ) -> anyhow::Result<(Vec<Content>, ReactionMap)> {
     let iter = manager
         .store()
-        .messages(thread, ..)
+        .messages(thread, since.unwrap_or(0)..)
         .await
         .context("failed to load messages")?;
 
@@ -1704,6 +1782,18 @@ mod tests {
         assert!(matches!(parse_thread_id(&"ab".repeat(32)), Ok(Thread::Group(_))));
         assert!(parse_thread_id("not-a-recipient").is_err());
         assert!(parse_thread_id(&"zz".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn since_accepts_durations_and_timestamps() {
+        let now = 1_000_000_000_000;
+        assert_eq!(since_to_millis("30m", now).unwrap(), now - 30 * 60_000);
+        assert_eq!(since_to_millis("2h", now).unwrap(), now - 2 * 3_600_000);
+        assert_eq!(since_to_millis("7d", now).unwrap(), now - 7 * 86_400_000);
+        assert_eq!(since_to_millis("1970-01-01T00:00:01+00:00", now).unwrap(), 1_000);
+        for bad in ["", "soon", "2x", "h", "2026-11-04"] {
+            assert!(since_to_millis(bad, now).is_err(), "{bad}");
+        }
     }
 
     #[test]
