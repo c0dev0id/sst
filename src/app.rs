@@ -1342,9 +1342,10 @@ pub async fn run<S: Store>(
                                 }
                             }
                         }
-                        // Reload chat messages and receipt state on any incoming event.
+                        // Reload the open chat when the event can change what it shows.
                         if matches!(app.view, View::ChatWindow)
                             && let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone())
+                            && signal::affects_thread(&received, &thread)
                         {
                             // Snapshot known timestamps before reload so we only
                             // ack messages that weren't visible when the chat opened.

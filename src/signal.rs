@@ -427,6 +427,18 @@ pub async fn connect<S: Store>(
     Ok(stream)
 }
 
+/// Whether a live event can change what an open chat shows: a message in that
+/// thread, or any receipt (group members' receipts arrive in their 1:1
+/// threads). Typing indicators and queue markers never do.
+pub fn affects_thread(received: &Received, thread: &Thread) -> bool {
+    let Received::Content(content) = received else { return false };
+    match &content.body {
+        ContentBody::TypingMessage(_) => false,
+        ContentBody::ReceiptMessage(_) => true,
+        _ => Thread::try_from(content.as_ref()).ok().as_ref() == Some(thread),
+    }
+}
+
 /// The chat-list effect of a live event: the thread's new preview and the
 /// timestamp of the message it describes. Receipts, typing and other bodiless
 /// events yield None so they cannot clear a preview or reorder the list.
