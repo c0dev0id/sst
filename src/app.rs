@@ -53,7 +53,7 @@ pub struct ChatState {
     pub reactions: ReactionMap,
     pub mode: Mode,
     pub reply_to: Option<usize>,           // message index set by 'r' in Normal mode
-    pub editing: Option<(usize, u64)>,     // (message index, timestamp) set by 'e' in Normal mode
+    pub editing: Option<u64>,              // timestamp of the message being edited, set by 'e'
     pub sender_names: HashMap<Uuid, String>, // resolved names for sender display and @mention
     pub pending_d: bool,                   // true after first 'd'; second 'd' triggers delete
     pub staged_attachments: Vec<StagedAttachment>,
@@ -61,6 +61,19 @@ pub struct ChatState {
 }
 
 impl ChatState {
+    /// Replace the message list, keeping the selection and reply target on the
+    /// same messages by timestamp. Indices shift when a message is deleted or
+    /// arrives out of order.
+    pub fn set_messages(&mut self, messages: Vec<Content>) {
+        let ts_at = |idx: Option<usize>| idx.and_then(|i| self.messages.get(i)).map(|m| m.timestamp());
+        let selected_ts = ts_at(self.selected_message);
+        let reply_ts = ts_at(self.reply_to);
+        self.messages = messages;
+        let index_of = |ts: Option<u64>| ts.and_then(|t| self.messages.iter().position(|m| m.timestamp() == t));
+        self.selected_message = index_of(selected_ts);
+        self.reply_to = index_of(reply_ts);
+    }
+
     /// Name shown for a thread participant; the local account is "You".
     pub fn display_name(&self, uuid: Uuid, own_aci: Option<Uuid>) -> String {
         if own_aci == Some(uuid) {
@@ -306,7 +319,7 @@ impl App {
                                     let body = signal::message_body(content, |u| chat.display_name(u, own_aci));
                                     chat.input = body;
                                     chat.cursor = chat.input.len();
-                                    chat.editing = Some((sel_idx, ts));
+                                    chat.editing = Some(ts);
                                     chat.mode = Mode::Insert;
                                 } else {
                                     chat.autocomplete_hint =
@@ -879,7 +892,7 @@ async fn reload_chat<S: Store>(
     if let Ok((msgs, rxns)) = signal::load_messages_and_reactions(manager, thread).await
         && let Some(c) = chat
     {
-        c.messages = msgs;
+        c.set_messages(msgs);
         c.reactions = rxns;
     }
 }
@@ -990,7 +1003,7 @@ async fn execute_cmd<S: Store>(
                 return Ok(());
             }
 
-            let sent = if let Some((_idx, edit_ts)) = chat.editing {
+            let sent = if let Some(edit_ts) = chat.editing {
                 signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await
             } else if let Some(quoted) = quoted {
                 signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await
@@ -1223,7 +1236,10 @@ async fn execute_cmd<S: Store>(
             }
             signal::delete_for_everyone(manager, &thread, timestamp).await?;
             if let Some(chat) = &mut app.chat {
-                chat.messages.remove(sel_idx);
+                let mut remaining = std::mem::take(&mut chat.messages);
+                remaining.remove(sel_idx);
+                chat.set_messages(remaining);
+                // The deleted message had the selection; move it to the neighbour.
                 let new_len = chat.messages.len();
                 chat.selected_message = if new_len == 0 {
                     None
@@ -1327,7 +1343,7 @@ pub async fn run<S: Store>(
                                     .collect();
 
                                 if let Some(chat) = &mut app.chat {
-                                    chat.messages = msgs;
+                                    chat.set_messages(msgs);
                                     if let Some((del, rd)) = receipt_state {
                                         chat.delivered = del;
                                         chat.read = rd;
