@@ -1186,7 +1186,7 @@ async fn execute_cmd<S: Store>(
                         match signal::download_attachment(manager, pointer, &dir, &filename).await {
                             Ok(_) => {}
                             Err(e) => {
-                                if let Some(c) = &mut app.chat { app.status = Some(e); }
+                                app.status = Some(e);
                                 return Ok(());
                             }
                         }

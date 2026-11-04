@@ -31,16 +31,16 @@ make install    # install release binary to ~/.bin/sst
 Four files under `src/`. Read in this order for a first pass:
 
 - **`main.rs`** (~600 lines) — Entry point, clap CLI, provisioning, instance lock, tokio runtime bootstrap. Dispatches to either `app::run` (TUI) or one of the `Cmd::{Link, Chats, Contacts, Print, PrintLast, Watch, Send}` handlers inline. `parse_thread_id` accepts a UUID (contact) or 64-char hex (group master key). The `send`/`print`/`print-last` subcommands intentionally skip the exclusive lock; all others hold it.
-- **`signal.rs`** (~1600 lines) — All presage interaction lives here. Public API: `relink_hint`, `stage_attachment`, `fmt_attachment_size`, `upload_staged_attachments`, `message_attachments`, `attachment_filename`, `unique_path`, `download_attachment`, `sync_contacts`, `sync`, `connect`, `affects_thread`, `extract_update`, `list_threads`, `list_all_contacts`, `fetch_missing_profiles`, `message_body`, `expire_timer`, `message_text`, `mentioned_acis`, `mention_names`, `thread_title`, `name_or_uuid`, `encode_mentions`, `quote_ref`, `lookup_contact_name`, `load_sender_names`, `load_messages_and_reactions`, `delete_for_everyone`, `send_reaction`, `outside_edit_window`, `send_edit`, `send_to_thread`, `send_reply`, `message_quote`, `own_aci`, `oldest_own_message_ts`, `load_receipt_state`, `send_read_receipts`. Types: `ReactionMap`, `ThreadEntry`, `MessageUpdate`, `SyncState`, `StagedAttachment`, `QuoteRef`.
-- **`app.rs`** (~1400 lines) — TUI state machine and event loop. `App` owns `threads`, `chat: Option<ChatState>`, view enum, and contact-browser state. `ChatState` carries the transient per-chat state (messages, cursor, mode, selection, reactions, staged attachments). Key handling is dispatched by view (`on_key_list`, `on_key_chat`, `on_key_contacts`) and by mode (`Normal`/`Insert`/`Command(String)`). `on_key` returns an `AppCmd`; the async event loop passes it to `execute_cmd` which does the actual Signal I/O and mutates `App`. An error from `execute_cmd` goes to `App::show_error` (status bar), never out of the loop.
-- **`ui.rs`** (~700 lines) — Pure ratatui rendering. No mutation of `App` beyond the widget-state fields ratatui writes back into (`ListState` selection, `viewport_top_msg`). Anything else is a bug.
+- **`signal.rs`** (~1700 lines) — All presage interaction lives here. Public API: `relink_hint`, `is_own`, `stage_attachment`, `fmt_attachment_size`, `upload_staged_attachments`, `message_attachments`, `attachment_filename`, `unique_path`, `download_attachment`, `sync_contacts`, `sync`, `connect`, `live_receipt`, `is_message_in`, `extract_update`, `list_threads`, `list_all_contacts`, `fetch_missing_profiles`, `or_uuid`, `message_body`, `is_displayable`, `expire_timer`, `message_text`, `mentioned_acis`, `mention_names`, `thread_title`, `name_or_uuid`, `encode_mentions`, `quote_of`, `lookup_contact_name`, `load_sender_names`, `load_messages_and_reactions`, `delete_for_everyone`, `send_reaction`, `outside_edit_window`, `send_edit`, `send_to_thread`, `send_reply`, `message_quote`, `own_service_id`, `own_aci`, `load_receipt_state`, `send_read_receipts`. Types: `ReactionMap`, `ThreadEntry`, `MessageUpdate`, `SyncState`, `StagedAttachment`.
+- **`app.rs`** (~1400 lines) — TUI state machine and event loop. `App` owns `threads`, `chat: Option<ChatState>`, view enum, and contact-browser state. `ChatState` carries the transient per-chat state (messages, cursor, mode, selection, reactions, staged attachments). Key handling is dispatched by view (`on_key_list`, `on_key_chat`, `on_key_contacts`) and by mode (`Normal`/`Insert`/`Command(String)`). `on_key` returns an `AppCmd`; the async event loop passes it to `execute_cmd` which does the actual Signal I/O and mutates `App`. An error from `execute_cmd` goes to `App::show_error`, never out of the loop. `App.status` is the one transient status line for all views; `on_key` clears it on every key except Tab.
+- **`ui.rs`** (~600 lines) — Pure ratatui rendering. No mutation of `App` beyond the widget-state fields ratatui writes back into (`ListState` selection, `viewport_top_msg`). Anything else is a bug.
 
 ## Event loop (in `app::run`)
 
 ```
 tokio::select! {
     event = events.next()              => on_key / on_paste → execute_cmd
-    event = next_or_pending(&mut stream) => extract_update → apply_update / add_thread; reload chat if affects_thread
+    event = next_or_pending(&mut stream) => on_live_event: fold into thread list; receipt → fold into ticks; message in open thread → load_chat_view
 }
 ```
 
@@ -48,7 +48,7 @@ tokio::select! {
 - Signal events come from `Manager::receive_messages() -> Stream<Item = Received>`. The stream can and will die (see dev journal "Signal receive stream may close after first live event") — when it does, `next_or_pending` returns `None`, we sleep 500 ms and attempt `receive_messages()` again. `signal_stream` is `Option<Pin<Box<...>>>`; `None` means "reconnecting".
 - A panic hook restores the terminal (raw mode off, alt-screen out, bracketed paste off) so an unexpected panic doesn't corrupt the user's shell. Do not remove.
 - `ui.rs` runs synchronously inside `terminal.draw(...)`; `execute_cmd` runs outside it and awaits Signal I/O. Keep Signal calls out of the draw path.
-- The open chat is reloaded only when `signal::affects_thread` says the event can change it: a message in that thread, or any receipt. Typing indicators never trigger a reload.
+- The open chat is reloaded (`load_chat_view`) only for a message in that thread (`signal::is_message_in`). A live receipt (`signal::live_receipt`) folds straight into the delivered/read sets without touching the store. Typing indicators do nothing.
 
 ## Commands are colon commands, not slash commands
 

@@ -156,8 +156,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     // lock_holder must live at the same scope as _lock_guard so the guard's
     // borrow into it stays valid for the whole run_inner call.
     let mut lock_holder: fd_lock::RwLock<std::fs::File>;
-    let mut holds_lock = false;
-    let _lock_guard = if lock_mode == LockMode::Never {
+    let lock_guard = if lock_mode == LockMode::Never {
         None
     } else {
         let lock_file = std::fs::OpenOptions::new()
@@ -168,10 +167,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             .context("failed to open lock file")?;
         lock_holder = fd_lock::RwLock::new(lock_file);
         match lock_holder.try_write() {
-            Ok(guard) => {
-                holds_lock = true;
-                Some(guard)
-            }
+            Ok(guard) => Some(guard),
             Err(_) if lock_mode == LockMode::IfFree => None,
             Err(_) => anyhow::bail!(
                 "another sst instance is already running\n\
@@ -179,7 +175,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             ),
         }
     };
-    match run_inner(args.cmd, db_path, data_dir, holds_lock).await {
+    match run_inner(args.cmd, db_path, data_dir, lock_guard.is_some()).await {
         Ok(()) => Ok(()),
         Err(e) => {
             if let Some(hint) = signal::relink_hint(&e) {
