@@ -640,7 +640,7 @@ impl App {
                 entry.unread = true;
             }
         }
-        self.threads.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+        self.threads.sort_by_key(|e| std::cmp::Reverse(e.last_ts));
         None
     }
 
@@ -653,7 +653,7 @@ impl App {
             last_ts: update.ts,
             unread,
         });
-        self.threads.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+        self.threads.sort_by_key(|e| std::cmp::Reverse(e.last_ts));
     }
 
     pub fn mark_read(&mut self, thread: &Thread) {

@@ -714,7 +714,7 @@ pub async fn expire_timer<S: Store>(manager: &Manager<S, Registered>, thread: &T
 pub(crate) fn fmt_duration(secs: u32) -> String {
     let (size, unit) = [(604_800, "week"), (86_400, "day"), (3_600, "hour"), (60, "minute")]
         .into_iter()
-        .find(|(size, _)| secs % size == 0)
+        .find(|(size, _)| secs.is_multiple_of(*size))
         .unwrap_or((1, "second"));
     let n = secs / size;
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
@@ -774,7 +774,7 @@ fn substitute_mentions(body: &str, ranges: &[BodyRange], name_of: impl Fn(Uuid) 
     }
     let mut units: Vec<u16> = body.encode_utf16().collect();
     // Splice from the end so earlier offsets stay valid.
-    mentions.sort_by(|a, b| b.0.cmp(&a.0));
+    mentions.sort_by_key(|&(start, _, _)| std::cmp::Reverse(start));
     for (start, len, aci) in mentions {
         let end = start + len;
         if len == 0 || end > units.len() {
