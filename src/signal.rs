@@ -189,14 +189,11 @@ pub async fn upload_staged_attachments<S: Store>(
     Ok(pointers)
 }
 
-/// Extract attachment pointers from a message (both incoming and own-device sync sends).
+/// Attachments the user may download. View-once media is excluded: linked
+/// devices show a placeholder for it, as the official clients do.
 pub fn message_attachments(content: &Content) -> &[AttachmentPointer] {
-    match &content.body {
-        ContentBody::DataMessage(dm) => &dm.attachments,
-        ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { message: Some(dm), .. }),
-            ..
-        }) => &dm.attachments,
+    match data_message_of(content) {
+        Some(dm) if dm.is_view_once != Some(true) => &dm.attachments,
         _ => &[],
     }
 }
@@ -663,9 +660,20 @@ pub fn message_body(content: &Content, name_of: impl Fn(Uuid) -> String) -> Stri
         return data_message_body(msg, name_of);
     }
     match &content.body {
-        ContentBody::CallMessage(_) => "Call".to_string(),
+        // Only the offer marks a call; ICE updates, hangups and busy signals are noise.
+        ContentBody::CallMessage(call) if call.offer.is_some() => "Incoming call".to_string(),
         _ => String::new(),
     }
+}
+
+/// Human-readable duration for whole weeks, days, hours, minutes or seconds.
+pub(crate) fn fmt_duration(secs: u32) -> String {
+    let (size, unit) = [(604_800, "week"), (86_400, "day"), (3_600, "hour"), (60, "minute")]
+        .into_iter()
+        .find(|(size, _)| secs % size == 0)
+        .unwrap_or((1, "second"));
+    let n = secs / size;
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 /// The message's text with mentions rendered, or empty when it has no text.
@@ -678,10 +686,26 @@ pub fn message_text(content: &Content, name_of: impl Fn(Uuid) -> String) -> Stri
 }
 
 fn data_message_body(msg: &DataMessage, name_of: impl Fn(Uuid) -> String) -> String {
+    let flags = msg.flags.unwrap_or(0);
+    if flags & data_message::Flags::ExpirationTimerUpdate as u32 != 0 {
+        return match msg.expire_timer {
+            Some(secs) if secs > 0 => format!("Disappearing message timer set to {}", fmt_duration(secs)),
+            _ => "Disappearing messages turned off".to_string(),
+        };
+    }
+    if flags & data_message::Flags::EndSession as u32 != 0 {
+        return "Session reset".to_string();
+    }
     match msg.body.as_deref() {
         Some(text) if !text.is_empty() => substitute_mentions(text, &msg.body_ranges, name_of),
+        _ if msg.is_view_once == Some(true) => "View-once media".to_string(),
         _ if !msg.attachments.is_empty() => "Attachment".to_string(),
         _ if msg.sticker.is_some() => "Sticker".to_string(),
+        _ if msg.payment.is_some() => "Payment".to_string(),
+        _ if msg.gift_badge.is_some() => "Gift badge".to_string(),
+        _ if !msg.contact.is_empty() => "Contact card".to_string(),
+        _ if msg.poll_create.is_some() => "Poll".to_string(),
+        _ if msg.group_v2.as_ref().is_some_and(|g| g.group_change.is_some()) => "Group updated".to_string(),
         _ => String::new(),
     }
 }
@@ -1480,6 +1504,16 @@ mod tests {
             (2, a, "❤️".to_string(), true, 100),
         ]);
         assert!(gone.is_empty());
+    }
+
+    #[test]
+    fn durations_use_the_largest_whole_unit() {
+        assert_eq!(fmt_duration(604_800), "1 week");
+        assert_eq!(fmt_duration(2 * 86_400), "2 days");
+        assert_eq!(fmt_duration(3_600), "1 hour");
+        assert_eq!(fmt_duration(300), "5 minutes");
+        assert_eq!(fmt_duration(30), "30 seconds");
+        assert_eq!(fmt_duration(90), "90 seconds");
     }
 
     #[test]
