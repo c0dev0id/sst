@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
 ### Added
+- The chat header shows the thread's disappearing-message timer when one is set.
 - Mentions: an `@Name` in the message (Tab-completed or typed) is sent as a Signal mention, so the member's client highlights it and notifies them. Applies to new messages, replies and edits. Replies quote the original text with its mentions intact.
 - Startup progress output: launching the TUI now prints "Connecting to Signal…", a live message-sync counter, a one-time "Fetching group metadata…" notice when group data is missing, and "Loading chats…" before the interface appears. Previously the terminal showed nothing while the backlog drained, so a slow first sync looked like a hang. Progress is written to stderr and only for the interactive TUI; the scriptable subcommands stay silent.
 - Attachment download: `:download` saves attachments from the selected message to `$HOME/Downloads/sst/<chat name>/`; `:download-all` downloads every attachment in the chat. Both commands accept an optional path argument to override the default directory. Filename collisions are resolved by inserting `_N` before the extension (`image.png` → `image_1.png`). Progress is shown on the status bar and updated per-file; files are written atomically so a mid-process kill never leaves a partial file.

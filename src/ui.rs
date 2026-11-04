@@ -212,8 +212,11 @@ fn draw_attachment_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_chat_header(f: &mut Frame, app: &App, area: Rect) {
-    let name = app.chat.as_ref().map_or("", |c| c.thread_name.as_str());
-    let header = Paragraph::new(format!(" {}", name))
+    let title = app.chat.as_ref().map_or_else(String::new, |c| match c.expire_timer {
+        Some(secs) => format!(" {}  ⏱ {}", c.thread_name, signal::fmt_duration(secs)),
+        None => format!(" {}", c.thread_name),
+    });
+    let header = Paragraph::new(title)
         .style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_widget(header, area);
 }

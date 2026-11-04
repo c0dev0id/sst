@@ -31,6 +31,7 @@ pub enum Mode {
 
 pub struct LoadedChat {
     pub messages: Vec<Content>,
+    pub expire_timer: Option<u32>,
     pub delivered: HashSet<u64>,
     pub read: HashSet<u64>,
     pub reactions: ReactionMap,
@@ -40,6 +41,7 @@ pub struct LoadedChat {
 pub struct ChatState {
     pub thread: Thread,
     pub thread_name: String,
+    pub expire_timer: Option<u32>,         // disappearing-message timer in seconds
     pub messages: Vec<Content>,
     pub scroll: usize,
     pub viewport_height: u16,
@@ -131,6 +133,7 @@ impl App {
         self.chat = Some(ChatState {
             thread,
             thread_name,
+            expire_timer: data.expire_timer,
             messages: data.messages,
             scroll: 0,
             viewport_height: 0,
@@ -927,6 +930,7 @@ async fn execute_cmd<S: Store>(
                 .await
                 .unwrap_or_default();
             let sender_names = signal::load_sender_names(manager, &thread, app.own_aci).await;
+            let expire_timer = signal::expire_timer(manager, &thread).await;
 
             let own_aci = app.own_aci;
             let to_ack: Vec<u64> = messages
@@ -938,6 +942,7 @@ async fn execute_cmd<S: Store>(
             app.mark_read(&thread);
             app.open_chat(thread.clone(), name, LoadedChat {
                 messages,
+                expire_timer,
                 delivered,
                 read,
                 reactions,
@@ -1340,6 +1345,7 @@ pub async fn run<S: Store>(
 
                             if let Ok((msgs, reactions)) = signal::load_messages_and_reactions(&manager, &thread).await {
                                 let receipt_state = signal::load_receipt_state(&manager, &thread).await.ok();
+                                let expire_timer = signal::expire_timer(&manager, &thread).await;
 
                                 let own_aci = app.own_aci;
                                 let to_ack: Vec<u64> = msgs
@@ -1351,6 +1357,7 @@ pub async fn run<S: Store>(
 
                                 if let Some(chat) = &mut app.chat {
                                     chat.set_messages(msgs);
+                                    chat.expire_timer = expire_timer;
                                     if let Some((del, rd)) = receipt_state {
                                         chat.delivered = del;
                                         chat.read = rd;

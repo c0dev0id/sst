@@ -666,6 +666,13 @@ pub fn message_body(content: &Content, name_of: impl Fn(Uuid) -> String) -> Stri
     }
 }
 
+/// The thread's disappearing-message timer in seconds, if one is set.
+pub async fn expire_timer<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> Option<u32> {
+    manager.store().expire_timer(thread).await.ok().flatten()
+        .map(|(secs, _)| secs)
+        .filter(|&secs| secs > 0)
+}
+
 /// Human-readable duration for whole weeks, days, hours, minutes or seconds.
 pub(crate) fn fmt_duration(secs: u32) -> String {
     let (size, unit) = [(604_800, "week"), (86_400, "day"), (3_600, "hour"), (60, "minute")]
