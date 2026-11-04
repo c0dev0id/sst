@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -63,8 +64,8 @@ pub struct ThreadEntry {
 
 impl ThreadEntry {
     // Constructors never set unread=true: the data source doesn't know
-    // whether the user has seen the message. Only App::on_signal marks
-    // a thread unread when a live event arrives.
+    // whether the user has seen the message. Only the live-event fold in
+    // app.rs marks a thread unread.
     pub fn new(thread: Thread, name: String, last_preview: Option<String>, last_ts: u64) -> Self {
         Self { thread, name, last_preview, last_ts, unread: false }
     }
@@ -447,7 +448,7 @@ pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Op
     let (preview, ts, edit_of) = match extract_edit(content) {
         Some((target_ts, edited)) => {
             let sent_ts = edited.timestamp.unwrap_or(target_ts);
-            (data_message_body(&edited, name_of), sent_ts, Some(target_ts))
+            (Shown::of_message(&edited).render(name_of), sent_ts, Some(target_ts))
         }
         None => (message_body(content, name_of), content.timestamp(), None),
     };
@@ -645,7 +646,8 @@ fn save_chunks<const N: usize>(path: &Path, items: &HashSet<[u8; N]>) -> std::io
 /// Preview text and timestamp of the newest displayable message in a thread.
 /// Receipts, reactions, deletions and edit records are skipped so bookkeeping
 /// rows cannot reorder the chat list. The store yields newest first, so an edit
-/// is seen before its target and replaces the target's text.
+/// is seen before its target and replaces the target's text. A thread whose
+/// newest rows are all bookkeeping is treated as empty after a bounded scan.
 async fn last_message<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
@@ -654,26 +656,20 @@ async fn last_message<S: Store>(
         return (None, 0);
     };
     let mut edits: HashMap<u64, DataMessage> = HashMap::new();
-    for result in iter {
-        let Ok(content) = result else { continue };
+    for result in iter.take(500) {
+        let Ok(mut content) = result else { continue };
         if let Some((target_ts, edited)) = extract_edit(&content) {
             edits.entry(target_ts).or_insert(edited);
             continue;
         }
-        let ts = content.timestamp();
-        let body = match edits.get(&ts) {
-            Some(edited) => {
-                let names = names_for_ranges(manager, &edited.body_ranges).await;
-                data_message_body(edited, |u| name_or_uuid(&names, u))
-            }
-            None => {
-                let names = mention_names(manager, &content).await;
-                message_body(&content, |u| name_or_uuid(&names, u))
-            }
-        };
-        if !body.is_empty() {
-            return (Some(body), ts);
+        if !is_displayable(&content) {
+            continue;
         }
+        if let Some(edited) = edits.get(&content.timestamp()) {
+            apply_edit(&mut content, edited);
+        }
+        let names = mention_names(manager, &content).await;
+        return (Some(message_body(&content, |u| name_or_uuid(&names, u))), content.timestamp());
     }
     (None, 0)
 }
@@ -690,17 +686,82 @@ fn data_message_of(content: &Content) -> Option<&DataMessage> {
     }
 }
 
-/// Display text of a message. Mention placeholders become `@Name` via `name_of`;
-/// attachment-only, sticker and call messages get a label instead of text.
+fn data_message_of_mut(content: &mut Content) -> Option<&mut DataMessage> {
+    match &mut content.body {
+        ContentBody::DataMessage(msg) => Some(msg),
+        ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(Sent { message: Some(msg), .. }),
+            ..
+        }) => Some(msg),
+        _ => None,
+    }
+}
+
+/// What a message shows: its text with mention ranges, a label standing in for
+/// content the terminal cannot render, or nothing (receipts, reactions, deletes).
+enum Shown<'a> {
+    Text(&'a str, &'a [BodyRange]),
+    Label(Cow<'static, str>),
+    Nothing,
+}
+
+impl<'a> Shown<'a> {
+    fn of_message(msg: &'a DataMessage) -> Self {
+        let flags = msg.flags.unwrap_or(0);
+        if flags & data_message::Flags::ExpirationTimerUpdate as u32 != 0 {
+            return Shown::Label(match msg.expire_timer {
+                Some(secs) if secs > 0 => format!("Disappearing message timer set to {}", fmt_duration(secs)).into(),
+                _ => "Disappearing messages turned off".into(),
+            });
+        }
+        if flags & data_message::Flags::EndSession as u32 != 0 {
+            return Shown::Label("Session reset".into());
+        }
+        let label = match msg.body.as_deref() {
+            Some(text) if !text.is_empty() => return Shown::Text(text, &msg.body_ranges),
+            _ if msg.is_view_once == Some(true) => "View-once media",
+            _ if !msg.attachments.is_empty() => "Attachment",
+            _ if msg.sticker.is_some() => "Sticker",
+            _ if msg.payment.is_some() => "Payment",
+            _ if msg.gift_badge.is_some() => "Gift badge",
+            _ if !msg.contact.is_empty() => "Contact card",
+            _ if msg.poll_create.is_some() => "Poll",
+            _ if msg.group_v2.as_ref().is_some_and(|g| g.group_change.is_some()) => "Group updated",
+            _ => return Shown::Nothing,
+        };
+        Shown::Label(label.into())
+    }
+
+    fn of_content(content: &'a Content) -> Self {
+        if let Some(msg) = data_message_of(content) {
+            return Shown::of_message(msg);
+        }
+        match &content.body {
+            // Only the offer marks a call; ICE updates, hangups and busy signals are noise.
+            ContentBody::CallMessage(call) if call.offer.is_some() => Shown::Label("Incoming call".into()),
+            _ => Shown::Nothing,
+        }
+    }
+
+    /// Mention placeholders become `@Name` via `name_of`.
+    fn render(self, name_of: impl Fn(Uuid) -> String) -> String {
+        match self {
+            Shown::Text(text, ranges) => substitute_mentions(text, ranges, name_of),
+            Shown::Label(label) => label.into_owned(),
+            Shown::Nothing => String::new(),
+        }
+    }
+}
+
+/// Display text of a message: its text with mentions rendered, or a label for
+/// content the terminal cannot show.
 pub fn message_body(content: &Content, name_of: impl Fn(Uuid) -> String) -> String {
-    if let Some(msg) = data_message_of(content) {
-        return data_message_body(msg, name_of);
-    }
-    match &content.body {
-        // Only the offer marks a call; ICE updates, hangups and busy signals are noise.
-        ContentBody::CallMessage(call) if call.offer.is_some() => "Incoming call".to_string(),
-        _ => String::new(),
-    }
+    Shown::of_content(content).render(name_of)
+}
+
+/// Whether the message has anything to show in a chat or preview.
+pub fn is_displayable(content: &Content) -> bool {
+    !matches!(Shown::of_content(content), Shown::Nothing)
 }
 
 /// The thread's disappearing-message timer in seconds, if one is set.
@@ -721,35 +782,10 @@ pub(crate) fn fmt_duration(secs: u32) -> String {
 }
 
 /// The message's text with mentions rendered, or empty when it has no text.
+/// Unlike message_body this never yields a label, so it is safe to edit and resend.
 pub fn message_text(content: &Content, name_of: impl Fn(Uuid) -> String) -> String {
-    let Some(msg) = data_message_of(content) else { return String::new() };
-    match msg.body.as_deref() {
-        Some(text) if !text.is_empty() => substitute_mentions(text, &msg.body_ranges, name_of),
-        _ => String::new(),
-    }
-}
-
-fn data_message_body(msg: &DataMessage, name_of: impl Fn(Uuid) -> String) -> String {
-    let flags = msg.flags.unwrap_or(0);
-    if flags & data_message::Flags::ExpirationTimerUpdate as u32 != 0 {
-        return match msg.expire_timer {
-            Some(secs) if secs > 0 => format!("Disappearing message timer set to {}", fmt_duration(secs)),
-            _ => "Disappearing messages turned off".to_string(),
-        };
-    }
-    if flags & data_message::Flags::EndSession as u32 != 0 {
-        return "Session reset".to_string();
-    }
-    match msg.body.as_deref() {
-        Some(text) if !text.is_empty() => substitute_mentions(text, &msg.body_ranges, name_of),
-        _ if msg.is_view_once == Some(true) => "View-once media".to_string(),
-        _ if !msg.attachments.is_empty() => "Attachment".to_string(),
-        _ if msg.sticker.is_some() => "Sticker".to_string(),
-        _ if msg.payment.is_some() => "Payment".to_string(),
-        _ if msg.gift_badge.is_some() => "Gift badge".to_string(),
-        _ if !msg.contact.is_empty() => "Contact card".to_string(),
-        _ if msg.poll_create.is_some() => "Poll".to_string(),
-        _ if msg.group_v2.as_ref().is_some_and(|g| g.group_change.is_some()) => "Group updated".to_string(),
+    match data_message_of(content).map(Shown::of_message) {
+        Some(Shown::Text(text, ranges)) => substitute_mentions(text, ranges, name_of),
         _ => String::new(),
     }
 }
@@ -848,13 +884,13 @@ pub fn encode_mentions(text: &str, names: &HashMap<Uuid, String>) -> (String, Ve
         body.push_str(plain);
         utf16_len += plain.encode_utf16().count();
         let candidate = &tail[1..];
-        let matched = at_word_boundary(&body)
-            .then(|| {
-                known
-                    .iter()
-                    .find(|(name, _)| candidate.starts_with(*name) && word_ends(&candidate[name.len()..]))
-            })
-            .flatten();
+        let matched = if at_word_boundary(&body) {
+            known
+                .iter()
+                .find(|(name, _)| candidate.starts_with(*name) && word_ends(&candidate[name.len()..]))
+        } else {
+            None
+        };
         match matched {
             Some((name, aci)) => {
                 ranges.push(BodyRange {
@@ -1006,14 +1042,7 @@ fn text_message_of(content: &Content) -> Option<&DataMessage> {
 
 /// Replace the text of a message with its edited version, mentions included.
 fn apply_edit(content: &mut Content, edited: &DataMessage) {
-    let msg = match &mut content.body {
-        ContentBody::DataMessage(msg) => msg,
-        ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { message: Some(msg), .. }),
-            ..
-        }) => msg,
-        _ => return,
-    };
+    let Some(msg) = data_message_of_mut(content) else { return };
     msg.body = edited.body.clone();
     msg.body_ranges = edited.body_ranges.clone();
 }
@@ -1048,18 +1077,9 @@ pub async fn load_messages_and_reactions<S: Store>(
             continue;
         }
 
-        let reaction_opt = match &content.body {
-            ContentBody::DataMessage(msg) => {
-                msg.reaction.as_ref().map(|r| (r, content.metadata.sender.raw_uuid()))
-            }
-            ContentBody::SynchronizeMessage(SyncMessage {
-                sent: Some(Sent { message: Some(msg), .. }),
-                ..
-            }) => {
-                msg.reaction.as_ref().map(|r| (r, content.metadata.sender.raw_uuid()))
-            }
-            _ => None,
-        };
+        let reaction_opt = data_message_of(&content)
+            .and_then(|msg| msg.reaction.as_ref())
+            .map(|r| (r, content.metadata.sender.raw_uuid()));
 
         if let Some((reaction, sender_uuid)) = reaction_opt {
             if let (Some(emoji), Some(target_ts)) = (
@@ -1074,7 +1094,7 @@ pub async fn load_messages_and_reactions<S: Store>(
                     target_ts,
                 ));
             }
-        } else if !message_body(&content, |u| u.to_string()).is_empty() {
+        } else if is_displayable(&content) {
             messages.push(content);
         }
     }
@@ -1262,12 +1282,12 @@ pub fn message_quote(content: &Content, name_of: impl Fn(Uuid) -> String) -> Opt
     } else {
         Uuid::parse_str(quote.author_aci.as_deref()?).ok()?
     };
-    let text = match quote.text.as_deref() {
-        Some(text) if !text.is_empty() => substitute_mentions(text, &quote.body_ranges, name_of),
-        _ if !quote.attachments.is_empty() => "Attachment".to_string(),
-        _ => String::new(),
+    let shown = match quote.text.as_deref() {
+        Some(text) if !text.is_empty() => Shown::Text(text, &quote.body_ranges),
+        _ if !quote.attachments.is_empty() => Shown::Label("Attachment".into()),
+        _ => Shown::Nothing,
     };
-    Some((author, text))
+    Some((author, shown.render(name_of)))
 }
 
 pub fn own_aci<S: Store>(manager: &Manager<S, Registered>) -> Uuid {
