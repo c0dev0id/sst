@@ -59,8 +59,9 @@ Chat window (Normal mode):
 | `:` | Command mode |
 | `h` / `q` / ← | Back to chat list |
 
-Insert mode: Enter sends, Alt+Enter inserts a newline, Tab completes an `@mention`,
-Esc discards. Command mode: `:react <emoji>` (raw emoji or gemoji shortcode like
+Insert mode: Enter sends, Alt+Enter inserts a newline, Tab completes an `@Name`
+mention (delivered as a real Signal mention, so that member gets notified), Esc
+discards. Command mode: `:react <emoji>` (raw emoji or gemoji shortcode like
 `wave`), `:quit`.
 
 ## CLI

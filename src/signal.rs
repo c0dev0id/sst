@@ -722,6 +722,88 @@ pub fn name_or_uuid(names: &HashMap<Uuid, String>, uuid: Uuid) -> String {
     names.get(&uuid).cloned().unwrap_or_else(|| uuid.to_string())
 }
 
+/// Turn `@Name` tokens into Signal mentions. A token matching a known name becomes
+/// a U+FFFC placeholder plus a BodyRange carrying that account's ACI.
+pub fn encode_mentions(text: &str, names: &HashMap<Uuid, String>) -> (String, Vec<BodyRange>) {
+    // Longest name first so "Stefan Hagen" wins over "Stefan".
+    let mut known: Vec<(&str, Uuid)> = names
+        .iter()
+        .filter(|(_, name)| !name.is_empty())
+        .map(|(aci, name)| (name.as_str(), *aci))
+        .collect();
+    known.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(b.0)));
+
+    let mut body = String::with_capacity(text.len());
+    let mut utf16_len = 0usize;
+    let mut ranges = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('@') {
+        let (plain, tail) = rest.split_at(at);
+        body.push_str(plain);
+        utf16_len += plain.encode_utf16().count();
+        let candidate = &tail[1..];
+        let matched = at_word_boundary(&body)
+            .then(|| {
+                known
+                    .iter()
+                    .find(|(name, _)| candidate.starts_with(*name) && word_ends(&candidate[name.len()..]))
+            })
+            .flatten();
+        match matched {
+            Some((name, aci)) => {
+                ranges.push(BodyRange {
+                    start: Some(utf16_len as u32),
+                    length: Some(1),
+                    associated_value: Some(AssociatedValue::MentionAci(aci.to_string())),
+                });
+                body.push('\u{FFFC}');
+                utf16_len += 1;
+                rest = &candidate[name.len()..];
+            }
+            None => {
+                body.push('@');
+                utf16_len += 1;
+                rest = candidate;
+            }
+        }
+    }
+    body.push_str(rest);
+    (body, ranges)
+}
+
+/// True unless `before` ends inside a word, which would make the `@` part of an address.
+fn at_word_boundary(before: &str) -> bool {
+    before.chars().next_back().is_none_or(|c| !c.is_alphanumeric())
+}
+
+fn word_ends(after: &str) -> bool {
+    after.chars().next().is_none_or(|c| !c.is_alphanumeric())
+}
+
+/// What a reply quotes: the original's timestamp, author, text and mention ranges.
+/// Messages without text quote their display label instead.
+pub struct QuoteRef {
+    pub ts: u64,
+    pub author: Uuid,
+    pub text: Option<String>,
+    pub body_ranges: Vec<BodyRange>,
+}
+
+pub fn quote_ref(content: &Content) -> QuoteRef {
+    let msg = data_message_of(content);
+    let body = msg.and_then(|m| m.body.clone()).filter(|b| !b.is_empty());
+    let text = body.or_else(|| {
+        let label = message_body(content, |u| u.to_string());
+        (!label.is_empty()).then_some(label)
+    });
+    QuoteRef {
+        ts: content.timestamp(),
+        author: content.metadata.sender.raw_uuid(),
+        text,
+        body_ranges: msg.map(|m| m.body_ranges.clone()).unwrap_or_default(),
+    }
+}
+
 /// Look up a contact's display name by UUID; falls back to the UUID string.
 pub async fn lookup_contact_name<S: Store>(
     manager: &Manager<S, Registered>,
@@ -957,10 +1039,12 @@ pub async fn send_edit<S: Store>(
     thread: &Thread,
     target_ts: u64,
     body: String,
+    body_ranges: Vec<BodyRange>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
     let data_message = DataMessage {
         body: Some(body),
+        body_ranges,
         timestamp: Some(ts),
         ..Default::default()
     };
@@ -975,11 +1059,13 @@ pub async fn send_to_thread<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     text: String,
+    body_ranges: Vec<BodyRange>,
     attachments: Vec<AttachmentPointer>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
     let data_message = DataMessage {
         body: if text.is_empty() { None } else { Some(text) },
+        body_ranges,
         timestamp: Some(ts),
         attachments,
         ..Default::default()
@@ -991,21 +1077,22 @@ pub async fn send_reply<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     text: String,
-    quote_ts: u64,
-    quote_author: Uuid,
-    quote_text: String,
+    body_ranges: Vec<BodyRange>,
+    quoted: QuoteRef,
     attachments: Vec<AttachmentPointer>,
 ) -> anyhow::Result<()> {
     let ts = now_millis()?;
     let quote = data_message::Quote {
-        id: Some(quote_ts),
-        author_aci: Some(quote_author.to_string()),
-        author_aci_binary: Some(quote_author.as_bytes().to_vec()),
-        text: if quote_text.is_empty() { None } else { Some(quote_text) },
+        id: Some(quoted.ts),
+        author_aci: Some(quoted.author.to_string()),
+        author_aci_binary: Some(quoted.author.as_bytes().to_vec()),
+        text: quoted.text,
+        body_ranges: quoted.body_ranges,
         ..Default::default()
     };
     let data_message = DataMessage {
         body: if text.is_empty() { None } else { Some(text) },
+        body_ranges,
         timestamp: Some(ts),
         quote: Some(quote),
         attachments,
@@ -1239,6 +1326,67 @@ mod tests {
             associated_value: Some(AssociatedValue::MentionAciBinary(bob().as_bytes().to_vec())),
         };
         assert_eq!(substitute_mentions("\u{FFFC}", &[range], names), "@Bob");
+    }
+
+    fn roster() -> HashMap<Uuid, String> {
+        HashMap::from([(alice(), "Alice".to_string()), (bob(), "Bob Builder".to_string())])
+    }
+
+    fn aci_of(range: &BodyRange) -> Uuid {
+        match range.associated_value.as_ref().unwrap() {
+            AssociatedValue::MentionAci(s) => Uuid::parse_str(s).unwrap(),
+            other => panic!("unexpected value {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encodes_known_name_as_placeholder_and_range() {
+        let (body, ranges) = encode_mentions("hi @Alice, ok?", &roster());
+        assert_eq!(body, "hi \u{FFFC}, ok?");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!((ranges[0].start, ranges[0].length), (Some(3), Some(1)));
+        assert_eq!(aci_of(&ranges[0]), alice());
+    }
+
+    #[test]
+    fn encoded_offsets_count_utf16_units() {
+        let (body, ranges) = encode_mentions("😀 @Alice", &roster());
+        assert_eq!(body, "😀 \u{FFFC}");
+        assert_eq!(ranges[0].start, Some(3));
+    }
+
+    #[test]
+    fn names_with_spaces_match_whole() {
+        let (body, ranges) = encode_mentions("@Bob Builder and @Alice", &roster());
+        assert_eq!(body, "\u{FFFC} and \u{FFFC}");
+        assert_eq!(ranges.iter().map(aci_of).collect::<Vec<_>>(), vec![bob(), alice()]);
+        assert_eq!(ranges[1].start, Some(6));
+    }
+
+    #[test]
+    fn longer_name_wins_over_its_prefix() {
+        let names = HashMap::from([(alice(), "Stefan".to_string()), (bob(), "Stefan Hagen".to_string())]);
+        let (_, ranges) = encode_mentions("@Stefan Hagen hi", &names);
+        assert_eq!(aci_of(&ranges[0]), bob());
+        let (_, ranges) = encode_mentions("@Stefan hi", &names);
+        assert_eq!(aci_of(&ranges[0]), alice());
+    }
+
+    #[test]
+    fn partial_words_and_addresses_stay_text() {
+        for text in ["@Alicia", "@Alicex", "mail me@Alice.org", "@Nobody"] {
+            let (body, ranges) = encode_mentions(text, &roster());
+            assert_eq!(body, text);
+            assert!(ranges.is_empty());
+        }
+    }
+
+    #[test]
+    fn mentions_round_trip() {
+        let text = "ping @Alice and @Bob Builder 😀 @Alice";
+        let (body, ranges) = encode_mentions(text, &roster());
+        let shown = substitute_mentions(&body, &ranges, |u| name_or_uuid(&roster(), u));
+        assert_eq!(shown, text);
     }
 
     #[test]

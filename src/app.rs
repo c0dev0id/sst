@@ -912,18 +912,10 @@ async fn execute_cmd<S: Store>(
             app.view = View::ChatList;
         }
         AppCmd::SendMessage => {
-            let own_aci = app.own_aci;
-            let (text, thread, reply_info, editing, staged) = {
+            let (text, body_ranges, thread, quoted, editing, staged) = {
                 let chat = app.chat.as_mut().expect("SendMessage with no open chat");
                 chat.cursor = 0;
-                let reply_info = chat.reply_to.and_then(|idx| {
-                    let msg = chat.messages.get(idx)?;
-                    Some((
-                        msg.timestamp(),
-                        msg.metadata.sender.raw_uuid(),
-                        signal::message_body(msg, |u| chat.display_name(u, own_aci)),
-                    ))
-                });
+                let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_ref);
                 let editing = chat.editing.take();
                 chat.reply_to = None;
                 // Take staged attachments out now; on upload failure restore them below.
@@ -932,7 +924,9 @@ async fn execute_cmd<S: Store>(
                 } else {
                     Vec::new()
                 };
-                (std::mem::take(&mut chat.input), chat.thread.clone(), reply_info, editing, staged)
+                let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
+                chat.input.clear();
+                (text, body_ranges, chat.thread.clone(), quoted, editing, staged)
             };
 
             let pointers = if !staged.is_empty() {
@@ -959,16 +953,15 @@ async fn execute_cmd<S: Store>(
                 Vec::new()
             };
 
-            let trimmed = text.trim();
-            if !trimmed.is_empty() || !pointers.is_empty() {
+            if !text.is_empty() || !pointers.is_empty() {
                 if let Some((_idx, edit_ts)) = editing {
-                    signal::send_edit(manager, &thread, edit_ts, trimmed.to_string()).await?;
+                    signal::send_edit(manager, &thread, edit_ts, text, body_ranges).await?;
                     if let Some(c) = &mut app.chat { c.selected_message = None; }
-                } else if let Some((q_ts, q_author, q_text)) = reply_info {
-                    signal::send_reply(manager, &thread, trimmed.to_string(), q_ts, q_author, q_text, pointers).await?;
+                } else if let Some(quoted) = quoted {
+                    signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await?;
                     if let Some(c) = &mut app.chat { c.selected_message = None; }
                 } else {
-                    signal::send_to_thread(manager, &thread, trimmed.to_string(), pointers).await?;
+                    signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await?;
                 }
                 reload_chat(manager, &thread, &mut app.chat).await;
             }

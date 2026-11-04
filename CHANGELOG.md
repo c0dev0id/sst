@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
 ### Added
+- Mentions: an `@Name` in the message (Tab-completed or typed) is sent as a Signal mention, so the member's client highlights it and notifies them. Applies to new messages, replies and edits. Replies quote the original text with its mentions intact.
 - Startup progress output: launching the TUI now prints "Connecting to Signal…", a live message-sync counter, a one-time "Fetching group metadata…" notice when group data is missing, and "Loading chats…" before the interface appears. Previously the terminal showed nothing while the backlog drained, so a slow first sync looked like a hang. Progress is written to stderr and only for the interactive TUI; the scriptable subcommands stay silent.
 - Attachment download: `:download` saves attachments from the selected message to `$HOME/Downloads/sst/<chat name>/`; `:download-all` downloads every attachment in the chat. Both commands accept an optional path argument to override the default directory. Filename collisions are resolved by inserting `_N` before the extension (`image.png` → `image_1.png`). Progress is shown on the status bar and updated per-file; files are written atomically so a mid-process kill never leaves a partial file.
 - File attachments: `:upload <path>` stages a file (validates immediately via metadata); multiple `:upload` calls accumulate in the attachment bar shown below the status bar. All staged attachments are uploaded and included when the next message is sent or replied. If a file becomes unavailable at send time, only that file is removed and the send is aborted; the user can re-add it and retry
@@ -69,7 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `/reply <text>` sends a Signal reply to the selected message; quoted author and first line of quoted text are rendered inline above the reply body.
 - Read receipts: opening a 1:1 chat sends a READ receipt to the contact for all their messages. Received delivery/read receipts are scanned from the store and shown as `✓` (delivered) or `✓✓` (read) at the end of the last body line of own sent messages.
 - Tab completion for slash commands: Tab completes `/reply`, `/quit`, `/react` on a unique prefix match; double Tab shows all matching commands on the status bar.
-- Tab completion for `@mentions`: `@<partial>Tab` completes on a unique match from known 1:1 contacts; double Tab shows all candidates on the status bar. Excludes "Note to Self".
+- Tab completion for `@mentions`: `@<partial>Tab` completes on a unique match from the chat's participants; double Tab shows all candidates on the status bar. Excludes "Note to Self".
 - Contact browser (`n` from chat list): shows all synced contacts and known groups regardless of message history; contacts first (alphabetical) then groups separated by a `── groups ──` divider. Allows opening any thread, including ones with no prior messages.
 
 ### Fixed

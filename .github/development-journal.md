@@ -131,6 +131,18 @@ Global `--db <path>` overrides the store location for all subcommands.
 
 `--format=json` outputs one JSON object per line (NDJSON). `--format=text` (default) outputs human-readable lines. `Format` uses `#[derive(ValueEnum)]` with `impl Display` so clap can display the default in `--help`. PascalCase variants become kebab-case automatically (`PrintLast` → `print-last`).
 
+### Mentions are body ranges, not text
+
+A Signal mention is a U+FFFC placeholder in `DataMessage.body` plus a `BodyRange`
+with `start`/`length` in UTF-16 code units and the mentioned ACI as its value.
+Receiving clients substitute the current display name at render time. `@Name`
+therefore exists only in sst's input buffer and on screen: `encode_mentions`
+converts it to placeholder + range at send time (matching against the thread's
+roster, longest name first) and `substitute_mentions` converts back for display.
+Quotes carry their own `body_ranges`, and so do edits. Offsets must be counted in
+UTF-16 units, not bytes or chars, or an emoji earlier in the line shifts the
+highlight on the recipient's client.
+
 ## Core Features
 
 See `README.md` for the full UX specification. High-level:
@@ -138,7 +150,7 @@ See `README.md` for the full UX specification. High-level:
 - QR-code-based device linking via presage
 - Chat list with 1:1 and group chat support (groups always have a title from Signal)
 - Chat window with inline reactions, quote-replies, and typing notifications
-- `@mention` autocomplete and path Tab-completion in colon commands
+- `@mention` autocomplete, sent as real Signal mentions; path Tab-completion in colon commands
 - Vim-modal chat window: Normal/Insert/Command modes; `:react`, `:upload`, `:download`, `:download-all`, `:quit` colon commands; `dd` delete-for-everyone
 - `j`/`k` message selection as prerequisite for reply/edit/react/delete
 - Attachment upload/download pipeline with staging, retry on per-file failure, and atomic writes

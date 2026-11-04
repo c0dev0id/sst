@@ -402,7 +402,7 @@ async fn run<S: Store>(
                 signal::upload_staged_attachments(&mut manager, &staged).await
                     .map_err(|(msg, _)| anyhow::anyhow!("{}", msg))?
             };
-            signal::send_to_thread(&mut manager, &thread, text, pointers).await?;
+            signal::send_to_thread(&mut manager, &thread, text, Vec::new(), pointers).await?;
             Ok(())
         }
     }

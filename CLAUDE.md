@@ -20,7 +20,7 @@ make test       # cargo test
 make install    # install release binary to ~/.bin/sst
 ```
 
-`cargo test <name>` runs a single test. There are no tests yet — a suite is worth adding when non-trivial pure logic accumulates (cursor helpers, thread-id parsing, emoji resolution, reaction map folding).
+`cargo test <name>` runs a single test. Tests live in `#[cfg(test)]` modules next to the code they cover; `signal.rs` has the mention codec tests. Add tests as pure logic accumulates (cursor helpers, thread-id parsing, emoji resolution, reaction map folding).
 
 **OpenBSD build environment:** `.cargo/config.toml` sets `LIBSQLITE3_SYS_USE_PKG_CONFIG=1` and `presage-store-sqlite` is pulled with `default-features = false`. This forces linking against system `libsqlite3` (LibreSSL-compatible) instead of the bundled SQLCipher build (which needs OpenSSL 3.x `EVP_MAC` APIs missing from LibreSSL). Do not remove either — see dev journal "OpenBSD SQLite workaround".
 
@@ -31,7 +31,7 @@ make install    # install release binary to ~/.bin/sst
 Four files under `src/`. Read in this order for a first pass:
 
 - **`main.rs`** (~500 lines) — Entry point, clap CLI, provisioning, instance lock, tokio runtime bootstrap. Dispatches to either `app::run` (TUI) or one of the `Cmd::{Link, Chats, Contacts, Print, PrintLast, Watch, Send}` handlers inline. `parse_thread_id` accepts a UUID (contact) or 64-char hex (group master key). The `send`/`print`/`print-last` subcommands intentionally skip the exclusive lock; all others hold it.
-- **`signal.rs`** (~1100 lines) — All presage interaction lives here. Public API: `connect`, `sync`, `sync_contacts`, `list_threads`, `list_all_contacts`, `load_messages`, `load_messages_and_reactions`, `load_receipt_state`, `load_sender_names`, `send_to_thread`, `send_edit`, `send_reaction`, `send_read_receipt`, `delete_for_everyone`, `stage_attachment`, `upload_staged_attachments`, `download_attachment`, `fetch_missing_profiles`, `extract_update`, `message_body`, `fmt_ts_long`. Types: `ThreadEntry`, `MessageUpdate`, `SyncState`, `StagedAttachment`, `ReactionMap`.
+- **`signal.rs`** (~1100 lines) — All presage interaction lives here. Public API: `connect`, `sync`, `sync_contacts`, `list_threads`, `list_all_contacts`, `load_messages`, `load_messages_and_reactions`, `load_receipt_state`, `load_sender_names`, `send_to_thread`, `send_reply`, `send_edit`, `send_reaction`, `send_read_receipt`, `delete_for_everyone`, `stage_attachment`, `upload_staged_attachments`, `download_attachment`, `fetch_missing_profiles`, `extract_update`, `message_body`, `message_quote`, `quote_ref`, `encode_mentions`, `mentioned_acis`, `mention_names`, `name_or_uuid`, `fmt_ts_long`. Types: `ThreadEntry`, `MessageUpdate`, `SyncState`, `StagedAttachment`, `ReactionMap`, `QuoteRef`.
 - **`app.rs`** (~1300 lines) — TUI state machine and event loop. `App` owns `threads`, `chat: Option<ChatState>`, view enum, and contact-browser state. `ChatState` carries the transient per-chat state (messages, cursor, mode, selection, reactions, staged attachments). Key handling is dispatched by view (`on_key_list`, `on_key_chat`, `on_key_contacts`) and by mode (`Normal`/`Insert`/`Command(String)`). `on_key` returns an `AppCmd`; the async event loop passes it to `execute_cmd` which does the actual Signal I/O and mutates `App`.
 - **`ui.rs`** (~640 lines) — Pure ratatui rendering. No mutation of `App` beyond the widget-state fields ratatui writes back into (`ListState` selection, `viewport_top_msg`). Anything else is a bug.
 
@@ -77,6 +77,7 @@ Pre-1.0.0: no migration code. If the on-disk format changes, `sst link` wipes an
 - **`selected_message` and `selected_attachment` are mutually exclusive** in `ChatState`. Navigation forms a circular ring: oldest message → newest → first staged file → last staged file → oldest message. Don't add a second selection cursor; extend the ring.
 - **Cursor is a byte offset** into the UTF-8 input string. Visual (line, column) is derived at render time via `cursor_line_col`. Keep it that way — two representations will desync.
 - **Groups always have a title** in Signal; no unnamed-group fallback is needed. But group metadata may be missing right after `sst link` (see journal "Group metadata gap after fresh device linking") — this is a presage limitation, not a bug in this code.
+- **Mentions are not text.** `@Name` exists only in the input buffer and on screen. On the wire a mention is U+FFFC in the body plus a `BodyRange` with UTF-16 offsets. `encode_mentions` and `substitute_mentions` are the only two places that know this; `message_body` takes a name resolver for that reason. Never display a raw `DataMessage.body`.
 - **`Manager::send_message()` writes to the local store synchronously before returning** — after send, reload messages from the DB directly rather than waiting for the SyncMessage echo. This is what `reload_chat` does.
 
 ## What Claude should not do here
