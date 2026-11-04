@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
 ### Fixed
+- Own messages in group chats now show ✓ and ✓✓: members' receipts arrive in their 1:1 threads and were never consulted. Read receipts are sent for group messages too, to each author. Reading a chat in sst now also clears its unread state on your other devices via a read sync.
 - Contacts without an address-book name show their Signal profile name instead of a phone number or UUID, everywhere the name appears.
 - Sending to a group you have left now fails with a message instead of appearing to succeed while nobody receives it, and such groups are left out of the new-chat browser. Group messages carry your profile key like 1:1 messages do.
 - Edits keep the original message's quote, attachments and disappearing-message timer; previously an edit went out as bare text. Editing or deleting a message older than 24 hours is refused with a hint, since Signal ignores such requests and sst would otherwise diverge from the other devices.

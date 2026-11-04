@@ -937,18 +937,19 @@ async fn execute_cmd<S: Store>(
 ) -> anyhow::Result<()> {
     match cmd {
         AppCmd::OpenChat { thread, name } => {
+            let own_aci = app.own_aci;
             let (messages, reactions) = signal::load_messages_and_reactions(manager, &thread).await?;
-            let (delivered, read) = signal::load_receipt_state(manager, &thread)
+            let oldest_own = signal::oldest_own_message_ts(&messages, own_aci);
+            let (delivered, read) = signal::load_receipt_state(manager, &thread, oldest_own)
                 .await
                 .unwrap_or_default();
-            let sender_names = signal::load_sender_names(manager, &thread, app.own_aci).await;
+            let sender_names = signal::load_sender_names(manager, &thread, own_aci).await;
             let expire_timer = signal::expire_timer(manager, &thread).await;
 
-            let own_aci = app.own_aci;
-            let to_ack: Vec<u64> = messages
+            let to_ack: Vec<(Uuid, u64)> = messages
                 .iter()
                 .filter(|m| own_aci.is_none_or(|a| a != m.metadata.sender.raw_uuid()))
-                .map(|m| m.timestamp())
+                .map(|m| (m.metadata.sender.raw_uuid(), m.timestamp()))
                 .collect();
 
             app.mark_read(&thread);
@@ -961,8 +962,8 @@ async fn execute_cmd<S: Store>(
                 sender_names,
             });
 
-            if let Err(e) = signal::send_read_receipt(manager, &thread, to_ack).await {
-                tracing::warn!("send_read_receipt: {e}");
+            if let Err(e) = signal::send_read_receipts(manager, to_ack).await {
+                tracing::warn!("send_read_receipts: {e}");
             }
         }
         AppCmd::OpenContactBrowser => {
@@ -1352,15 +1353,16 @@ pub async fn run<S: Store>(
                                 .unwrap_or_default();
 
                             if let Ok((msgs, reactions)) = signal::load_messages_and_reactions(&manager, &thread).await {
-                                let receipt_state = signal::load_receipt_state(&manager, &thread).await.ok();
+                                let own_aci = app.own_aci;
+                                let oldest_own = signal::oldest_own_message_ts(&msgs, own_aci);
+                                let receipt_state = signal::load_receipt_state(&manager, &thread, oldest_own).await.ok();
                                 let expire_timer = signal::expire_timer(&manager, &thread).await;
 
-                                let own_aci = app.own_aci;
-                                let to_ack: Vec<u64> = msgs
+                                let to_ack: Vec<(Uuid, u64)> = msgs
                                     .iter()
                                     .filter(|m| !known.contains(&m.timestamp()))
                                     .filter(|m| own_aci.is_none_or(|a| a != m.metadata.sender.raw_uuid()))
-                                    .map(|m| m.timestamp())
+                                    .map(|m| (m.metadata.sender.raw_uuid(), m.timestamp()))
                                     .collect();
 
                                 if let Some(chat) = &mut app.chat {
@@ -1373,10 +1375,8 @@ pub async fn run<S: Store>(
                                     chat.reactions = reactions;
                                 }
 
-                                if !to_ack.is_empty()
-                                    && let Err(e) = signal::send_read_receipt(&mut manager, &thread, to_ack).await
-                                {
-                                    tracing::warn!("send_read_receipt: {e}");
+                                if let Err(e) = signal::send_read_receipts(&mut manager, to_ack).await {
+                                    tracing::warn!("send_read_receipts: {e}");
                                 }
                             }
                         }

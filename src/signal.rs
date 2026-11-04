@@ -13,7 +13,7 @@ use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
-use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, body_range::AssociatedValue, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::Sent};
+use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, body_range::AssociatedValue, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::{self, Sent}};
 use presage::libsignal_service::sender::AttachmentSpec;
 
 /// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
@@ -1245,31 +1245,60 @@ pub fn message_quote(content: &Content, name_of: impl Fn(Uuid) -> String) -> Opt
     Some((author, text))
 }
 
-/// Returns (delivered_timestamps, read_timestamps) for our sent messages in this thread.
-/// Scans stored ReceiptMessage entries; read implies delivered.
+pub fn own_aci<S: Store>(manager: &Manager<S, Registered>) -> Uuid {
+    ServiceId::Aci(manager.registration_data().service_ids.aci()).raw_uuid()
+}
+
+/// Timestamp of the oldest message we sent in `messages`; receipts for our
+/// messages cannot predate it.
+pub fn oldest_own_message_ts(messages: &[Content], own_aci: Option<Uuid>) -> Option<u64> {
+    messages
+        .iter()
+        .filter(|m| own_aci == Some(m.metadata.sender.raw_uuid()))
+        .map(|m| m.timestamp())
+        .min()
+}
+
+/// Delivery and read receipts for our messages in a thread, as
+/// (delivered_timestamps, read_timestamps); read implies delivered. Group
+/// members send receipts in their own 1:1 thread, so a group is resolved by
+/// scanning every member's thread. Scanning starts at `oldest_own_ts`.
 pub async fn load_receipt_state<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
+    oldest_own_ts: Option<u64>,
 ) -> anyhow::Result<(HashSet<u64>, HashSet<u64>)> {
-    let iter = manager
-        .store()
-        .messages(thread, ..)
-        .await
-        .context("failed to load messages for receipt state")?;
-
     let mut delivered: HashSet<u64> = HashSet::new();
     let mut read: HashSet<u64> = HashSet::new();
-
-    for result in iter {
-        let Ok(content) = result else { continue };
-        if let ContentBody::ReceiptMessage(receipt) = &content.body {
-            let kind = receipt.r#type.and_then(|t| receipt_message::Type::try_from(t).ok());
-            match kind {
+    let Some(from) = oldest_own_ts else {
+        return Ok((delivered, read));
+    };
+    let sources: Vec<Thread> = match thread {
+        Thread::Contact(_) => vec![thread.clone()],
+        Thread::Group(key) => match manager.store().group(*key).await {
+            Ok(Some(group)) => group.members.into_iter().map(|m| Thread::Contact(ServiceId::Aci(m.aci))).collect(),
+            _ => Vec::new(),
+        },
+    };
+    let own = own_aci(manager);
+    for source in &sources {
+        let iter = manager
+            .store()
+            .messages(source, from..)
+            .await
+            .context("failed to load messages for receipt state")?;
+        for result in iter {
+            let Ok(content) = result else { continue };
+            // Receipts we sent are stored in the same thread; they say nothing about our messages.
+            if content.metadata.sender.raw_uuid() == own {
+                continue;
+            }
+            let ContentBody::ReceiptMessage(receipt) = &content.body else { continue };
+            match receipt.r#type.and_then(|t| receipt_message::Type::try_from(t).ok()) {
                 Some(receipt_message::Type::Delivery) => {
                     delivered.extend(receipt.timestamp.iter().copied());
                 }
                 Some(receipt_message::Type::Read) => {
-                    // Read implies delivered
                     read.extend(receipt.timestamp.iter().copied());
                     delivered.extend(receipt.timestamp.iter().copied());
                 }
@@ -1277,33 +1306,48 @@ pub async fn load_receipt_state<S: Store>(
             }
         }
     }
-
     Ok((delivered, read))
 }
 
-/// Send a READ receipt to the contact for the given message timestamps.
-/// Silently skips group threads (would need per-sender dispatch).
-pub async fn send_read_receipt<S: Store>(
+/// Tell each author we read their messages, then tell our other devices so they
+/// clear the unread state too. `read` pairs each message's author with its timestamp.
+pub async fn send_read_receipts<S: Store>(
     manager: &mut Manager<S, Registered>,
-    thread: &Thread,
-    timestamps: Vec<u64>,
+    read: Vec<(Uuid, u64)>,
 ) -> anyhow::Result<()> {
-    if timestamps.is_empty() {
+    if read.is_empty() {
         return Ok(());
     }
-    let service_id = match thread {
-        Thread::Contact(sid) => *sid,
-        Thread::Group(_) => return Ok(()),
+    let mut by_author: HashMap<Uuid, Vec<u64>> = HashMap::new();
+    for (author, ts) in &read {
+        by_author.entry(*author).or_default().push(*ts);
+    }
+    for (author, timestamps) in by_author {
+        let receipt = ReceiptMessage {
+            r#type: Some(receipt_message::Type::Read as i32),
+            timestamp: timestamps,
+        };
+        manager
+            .send_message(ServiceId::Aci(author.into()), receipt, now_millis()?)
+            .await
+            .context("failed to send read receipt")?;
+    }
+    let sync = SyncMessage {
+        read: read
+            .into_iter()
+            .map(|(author, ts)| sync_message::Read {
+                sender_aci: Some(author.to_string()),
+                sender_aci_binary: Some(author.as_bytes().to_vec()),
+                timestamp: Some(ts),
+            })
+            .collect(),
+        ..Default::default()
     };
-    let ts = now_millis()?;
-    let receipt = ReceiptMessage {
-        r#type: Some(receipt_message::Type::Read as i32),
-        timestamp: timestamps,
-    };
+    let own = ServiceId::Aci(manager.registration_data().service_ids.aci());
     manager
-        .send_message(service_id, receipt, ts)
+        .send_message(own, sync, now_millis()?)
         .await
-        .context("failed to send read receipt")?;
+        .context("failed to sync read state to own devices")?;
     Ok(())
 }
 
