@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `sst chats` and `sst contacts` work beside a running TUI or `sst watch`: they read the local store instead of failing on the instance lock, and sync first only when nothing else is running.
 - `print` and `print-last` sync with Signal only when no other sst instance is running; beside the TUI or `sst watch` they read the local store, which that instance keeps current. Previously two processes consumed the same device queue.
 - `sst chats --format=json` emits `timestamp` in RFC 3339 like `print` does, replacing the epoch-millisecond `last_ts` field.
 - `sst link` now prints "Linking successful. Device provisioned." on success, "Linking timed out…" after 5 minutes of no QR scan, and clearly labels underlying failures. Previously the QR appeared and the command exited silently on both success and timeout, giving no feedback either way.

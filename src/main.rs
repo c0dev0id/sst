@@ -184,11 +184,14 @@ fn open_lock_file(data_dir: &Path) -> anyhow::Result<fd_lock::RwLock<std::fs::Fi
 
 /// Run a subcommand that uses the store directly. Interactive and streaming
 /// subcommands need the Signal session to themselves and fail if another
-/// instance holds the lock. print and print-last take the lock when it is free
-/// so they can sync first; when another instance holds it, that instance keeps
-/// the store current and they read it as is.
+/// instance holds the lock. The listing subcommands take the lock when it is
+/// free so they can sync first; when another instance holds it, that instance
+/// keeps the store current and they read it as is.
 async fn run_locked(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
-    let read_only_is_fine = matches!(cmd, Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. }));
+    let read_only_is_fine = matches!(
+        cmd,
+        Some(Cmd::Chats { .. }) | Some(Cmd::Contacts { .. }) | Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. })
+    );
     let mut lock = open_lock_file(&data_dir)?;
     let lock_guard = match lock.try_write() {
         Ok(guard) => Some(guard),
@@ -307,7 +310,7 @@ async fn run<S: Store>(
         load_manager(store).await?
     };
 
-    let mut state = signal::SyncState { data_dir, own_aci: None };
+    let mut state = signal::SyncState { data_dir, own_aci: Some(signal::own_aci(&manager)) };
 
     match cmd {
         None => {
@@ -323,7 +326,9 @@ async fn run<S: Store>(
         }
 
         Some(Cmd::Chats { format }) => {
-            signal::sync(&mut manager, &mut state).await?;
+            if may_sync {
+                signal::sync(&mut manager, &mut state).await?;
+            }
             let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
             for entry in &threads {
                 match format {
@@ -348,10 +353,12 @@ async fn run<S: Store>(
         }
 
         Some(Cmd::Contacts { format }) => {
-            eprintln!("Syncing contacts…");
-            signal::sync_contacts(&mut manager, &mut state).await?;
-            if let Err(e) = signal::fetch_missing_profiles(&mut manager).await {
-                tracing::warn!("profile fetch: {e:#}");
+            if may_sync {
+                eprintln!("Syncing contacts…");
+                signal::sync_contacts(&mut manager, &mut state).await?;
+                if let Err(e) = signal::fetch_missing_profiles(&mut manager).await {
+                    tracing::warn!("profile fetch: {e:#}");
+                }
             }
             let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
             for entry in &contacts {

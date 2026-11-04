@@ -68,8 +68,8 @@ discards. Command mode: `:react <emoji>` (raw emoji or gemoji shortcode like
 
 `sst` runs non-interactively for scripting. `send` hands the message to a running
 TUI or `watch` over a local socket, or sends directly when nothing else is running.
-`print` and `print-last` read the local store beside a running instance; other
-subcommands hold an exclusive lock.
+`chats`, `contacts`, `print` and `print-last` read the local store beside a running
+instance and sync first when nothing else is running; `watch` holds the session.
 
 | Command | Description |
 |---------|-------------|
