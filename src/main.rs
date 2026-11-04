@@ -323,7 +323,7 @@ async fn run<S: Store>(
             signal::sync(&mut manager, &mut state).await?;
             let thread = parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
-            print_messages(&manager, &messages, &format).await;
+            print_messages(&mut manager, &thread, &messages, &format).await;
             Ok(())
         }
 
@@ -332,7 +332,7 @@ async fn run<S: Store>(
             let thread = parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             let start = messages.len().saturating_sub(count);
-            print_messages(&manager, &messages[start..], &format).await;
+            print_messages(&mut manager, &thread, &messages[start..], &format).await;
             Ok(())
         }
 
@@ -340,7 +340,7 @@ async fn run<S: Store>(
             let thread = parse_thread_id(&recipient)?;
             // BTreeSet allows evicting entries older than the dedup window in O(log n).
             let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-            let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+            let mut names = signal::load_sender_names(&mut manager, &thread, None).await;
             let start_ts = signal::now_millis().unwrap_or(0);
 
             'reconnect: loop {
@@ -435,12 +435,16 @@ async fn resolved_body<S: Store>(
     signal::message_body(content, |u| signal::name_or_uuid(cache, u))
 }
 
+/// Print messages with names resolved like the TUI does: group roster first
+/// (profiles fetched and cached for members outside the contact store), then
+/// the contact store for anyone else.
 async fn print_messages<S: Store>(
-    manager: &Manager<S, Registered>,
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
     messages: &[Content],
     format: &Format,
 ) {
-    let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    let mut names = signal::load_sender_names(manager, thread, None).await;
     for msg in messages {
         let uuid = msg.metadata.sender.raw_uuid();
         let sender_name = cached_sender_name(&mut names, manager, uuid).await;
