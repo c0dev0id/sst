@@ -376,7 +376,8 @@ pub async fn sync_contacts<S: Store>(
         match stream.next().await {
             Some(Received::QueueEmpty) => break,
             Some(Received::Contacts) => return Ok(()),
-            Some(_) | None => {}
+            Some(Received::Content(_)) => {}
+            None => anyhow::bail!("receive stream closed before the message queue was drained"),
         }
     }
 
