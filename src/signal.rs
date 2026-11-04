@@ -460,7 +460,7 @@ pub async fn list_threads<S: Store>(
         let name = if own_aci == Some(contact.uuid) {
             "Note to Self".to_string()
         } else {
-            contact_display_name(&contact)
+            contact_display_name(manager, &contact).await
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
@@ -477,7 +477,7 @@ pub async fn list_threads<S: Store>(
         let service_id = ServiceId::Aci(uuid.into());
         let thread = Thread::Contact(service_id);
         let name = match manager.store().contact_by_id(&service_id).await {
-            Ok(Some(contact)) => contact_display_name(&contact),
+            Ok(Some(contact)) => contact_display_name(manager, &contact).await,
             _ => uuid.to_string(),
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
@@ -515,7 +515,7 @@ pub async fn list_all_contacts<S: Store>(
         }
         let service_id = ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
-        let name = contact_display_name(&contact);
+        let name = contact_display_name(manager, &contact).await;
         contact_entries.push(ThreadEntry::new(thread, name, None, 0));
     }
     contact_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -585,14 +585,30 @@ pub async fn fetch_missing_profiles<S: Store>(
     Ok(resolved)
 }
 
-fn contact_display_name(contact: &presage::model::contacts::Contact) -> String {
+/// A contact's name in Signal's order of preference: the address-book name,
+/// then the name on their profile (as cached by presage), then phone number,
+/// then UUID.
+async fn contact_display_name<S: Store>(
+    manager: &Manager<S, Registered>,
+    contact: &presage::model::contacts::Contact,
+) -> String {
     if !contact.name.is_empty() {
         return contact.name.clone();
+    }
+    if let Some(name) = cached_profile_name(manager, contact.uuid).await {
+        return name;
     }
     contact
         .phone_number
         .as_ref()
         .map_or_else(|| contact.uuid.to_string(), ToString::to_string)
+}
+
+async fn cached_profile_name<S: Store>(manager: &Manager<S, Registered>, uuid: Uuid) -> Option<String> {
+    let service_id = ServiceId::Aci(uuid.into());
+    let key = manager.store().profile_key(&service_id).await.ok().flatten()?;
+    let profile = manager.store().profile(uuid, key).await.ok().flatten()?;
+    profile.name.map(|n| n.to_string()).filter(|n| !n.is_empty())
 }
 
 // On-disk format for both known contacts (16-byte UUIDs) and known group
@@ -892,7 +908,7 @@ pub async fn lookup_contact_name<S: Store>(
 ) -> String {
     let service_id = ServiceId::Aci(uuid.into());
     match manager.store().contact_by_id(&service_id).await {
-        Ok(Some(contact)) => contact_display_name(&contact),
+        Ok(Some(contact)) => contact_display_name(manager, &contact).await,
         _ => uuid.to_string(),
     }
 }
