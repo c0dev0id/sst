@@ -7,8 +7,20 @@ use ratatui::widgets::{Block, List, ListItem, Paragraph};
 use ratatui::Frame;
 use presage::store::ContentExt;
 
-use crate::app::{App, Mode, View};
+use presage::libsignal_service::prelude::Uuid;
+
+use crate::app::{App, ChatState, Mode, View};
 use crate::signal;
+
+/// Name shown for a message author: "You", the contact in a 1:1 chat, or the
+/// resolved group member.
+fn author_label(chat: &ChatState, is_group: bool, own_aci: Option<Uuid>, uuid: Uuid) -> String {
+    if is_group || own_aci == Some(uuid) {
+        chat.display_name(uuid, own_aci)
+    } else {
+        chat.thread_name.clone()
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     match app.view {
@@ -223,7 +235,6 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     let own_aci = app.own_aci;
     let is_group = matches!(chat.thread, presage::store::Thread::Group(_));
-    let thread_name = chat.thread_name.clone();
     let selected = chat.selected_message;
     let highlight = Style::default().bg(Color::Blue).fg(Color::White);
 
@@ -243,15 +254,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         let is_own = own_aci.is_some_and(|a| a == sender_uuid);
         let is_selected = selected == Some(msg_idx);
 
-        let sender_label = if is_own {
-            "You".to_string()
-        } else if is_group {
-            chat.sender_names.get(&sender_uuid)
-                .cloned()
-                .unwrap_or_else(|| sender_uuid.to_string())
-        } else {
-            thread_name.clone()
-        };
+        let sender_label = author_label(chat, is_group, own_aci, sender_uuid);
 
         // Record where this message's visual region begins (before separator).
         msg_visual_starts.push(lines.len());
@@ -297,11 +300,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         if let Some((q_author_uuid, q_text)) =
             signal::message_quote(content, |u| chat.display_name(u, own_aci))
         {
-            let q_author = if is_group || own_aci == Some(q_author_uuid) {
-                chat.display_name(q_author_uuid, own_aci)
-            } else {
-                thread_name.clone()
-            };
+            let q_author = author_label(chat, is_group, own_aci, q_author_uuid);
             let q_first_line = q_text.lines().next().unwrap_or("…");
             let q_line = Line::from(Span::styled(
                 format!("  > {}: {}", q_author, q_first_line),
@@ -507,6 +506,7 @@ fn chat_status_bar(app: &App) -> String {
     if let Some(hint) = &chat.autocomplete_hint {
         return format!("  {}", hint);
     }
+    let is_group = matches!(chat.thread, presage::store::Thread::Group(_));
 
     match &chat.mode {
         Mode::Normal => {
@@ -522,9 +522,7 @@ fn chat_status_bar(app: &App) -> String {
             if let Some(sel_idx) = chat.selected_message
                 && let Some(content) = chat.messages.get(sel_idx)
             {
-                let sender_uuid = content.metadata.sender.raw_uuid();
-                let is_own = app.own_aci.is_some_and(|a| a == sender_uuid);
-                let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+                let sender = author_label(chat, is_group, app.own_aci, content.metadata.sender.raw_uuid());
                 let ts = signal::fmt_ts_long(content.timestamp());
                 let pos = format!("{}/{}", sel_idx + 1, chat.messages.len());
                 return format!(
@@ -541,9 +539,7 @@ fn chat_status_bar(app: &App) -> String {
             if let Some(reply_idx) = chat.reply_to
                 && let Some(content) = chat.messages.get(reply_idx)
             {
-                let sender_uuid = content.metadata.sender.raw_uuid();
-                let is_own = app.own_aci.is_some_and(|a| a == sender_uuid);
-                let sender = if is_own { "You".to_string() } else { chat.thread_name.clone() };
+                let sender = author_label(chat, is_group, app.own_aci, content.metadata.sender.raw_uuid());
                 return format!(
                     "  -- INSERT -- replying to {}   Esc cancel   Enter send",
                     sender
