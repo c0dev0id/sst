@@ -736,6 +736,17 @@ async fn names_for_ranges<S: Store>(
     names
 }
 
+/// Display name of a thread: the contact's name or the group title.
+pub async fn thread_title<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> String {
+    match thread {
+        Thread::Contact(sid) => lookup_contact_name(manager, sid.raw_uuid()).await,
+        Thread::Group(key) => match manager.store().group(*key).await {
+            Ok(Some(group)) => group.title,
+            _ => "Unknown group".to_string(),
+        },
+    }
+}
+
 pub fn name_or_uuid(names: &HashMap<Uuid, String>, uuid: Uuid) -> String {
     names.get(&uuid).cloned().unwrap_or_else(|| uuid.to_string())
 }

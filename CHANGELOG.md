@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
 ### Fixed
+- Unread markers: messages sent from another of your devices, and messages arriving in the chat you are viewing, no longer mark the thread unread. Opening a chat clears its marker, and returning to the chat list keeps the others. A first message from an unlisted contact or group adds the thread under its real name instead of a UUID or not at all.
 - Chat list order and previews follow the newest real message in each thread. Receipts, reactions and deleted-message markers no longer count, so opening a chat does not move it to the top, and group members who had only ever sent receipts no longer appear as empty threads. Edits update the preview when they hit the newest message.
 - `sst contacts` no longer spins at full CPU when the Signal connection drops before the message queue is drained; it exits with an error instead.
 - A person who changes their reaction on a message no longer shows up under both emojis; the new reaction replaces the old one, as on other Signal clients.

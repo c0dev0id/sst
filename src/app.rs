@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
-use crate::signal::{self, ReactionMap, StagedAttachment, ThreadEntry};
+use crate::signal::{self, ReactionMap, StagedAttachment, ThreadEntry, MessageUpdate};
 
 pub enum View {
     ChatList,
@@ -574,46 +574,57 @@ impl App {
         }
     }
 
-    /// Update the thread list from a live event. `names` resolves mentioned accounts.
-    pub fn on_signal(&mut self, content: &Content, names: &HashMap<Uuid, String>) {
-        let Some(update) = signal::extract_update(content, |u| signal::name_or_uuid(names, u)) else {
-            return;
-        };
+    /// Whether a live message should mark its thread unread: not when the user
+    /// sent it from another device, and not when they are looking at that chat.
+    fn marks_unread(&self, thread: &Thread, from_self: bool) -> bool {
+        !from_self && !self.chat.as_ref().is_some_and(|c| &c.thread == thread)
+    }
 
-        if let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) {
-            if update.is_edit {
-                // An edit changes text only; it shows in the list if it hit the newest message.
-                if update.ts == entry.last_ts {
-                    entry.last_preview = Some(update.preview);
-                }
-                return;
+    /// Fold a live message into its thread entry. Returns the update when no
+    /// entry exists for its thread, so the caller can add one with a name.
+    pub fn apply_update(&mut self, update: MessageUpdate, from_self: bool) -> Option<MessageUpdate> {
+        let mark_unread = self.marks_unread(&update.thread, from_self);
+        let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) else {
+            return (!update.is_edit).then_some(update);
+        };
+        if update.is_edit {
+            // An edit changes text only; it shows in the list if it hit the newest message.
+            if update.ts == entry.last_ts {
+                entry.last_preview = Some(update.preview);
             }
-            // Backlog delivery can be out of order; an older message must not replace the preview.
-            if update.ts < entry.last_ts {
-                return;
-            }
-            entry.last_preview = Some(update.preview);
-            if update.ts > entry.last_ts {
-                entry.last_ts = update.ts;
+            return None;
+        }
+        // Backlog delivery can be out of order; an older message must not replace the preview.
+        if update.ts < entry.last_ts {
+            return None;
+        }
+        entry.last_preview = Some(update.preview);
+        if update.ts > entry.last_ts {
+            entry.last_ts = update.ts;
+            if mark_unread {
                 entry.unread = true;
             }
-        } else {
-            if update.is_edit {
-                return;
-            }
-            let name = match &update.thread {
-                Thread::Contact(sid) => sid.raw_uuid().to_string(),
-                Thread::Group(_) => return,
-            };
-            self.threads.push(ThreadEntry {
-                thread: update.thread.clone(),
-                name,
-                last_preview: Some(update.preview),
-                last_ts: update.ts,
-                unread: true,
-            });
         }
         self.threads.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+        None
+    }
+
+    pub fn add_thread(&mut self, update: MessageUpdate, name: String, from_self: bool) {
+        let unread = self.marks_unread(&update.thread, from_self);
+        self.threads.push(ThreadEntry {
+            thread: update.thread,
+            name,
+            last_preview: Some(update.preview),
+            last_ts: update.ts,
+            unread,
+        });
+        self.threads.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    }
+
+    pub fn mark_read(&mut self, thread: &Thread) {
+        if let Some(entry) = self.threads.iter_mut().find(|e| &e.thread == thread) {
+            entry.unread = false;
+        }
     }
 }
 
@@ -904,6 +915,7 @@ async fn execute_cmd<S: Store>(
                 .map(|m| m.timestamp())
                 .collect();
 
+            app.mark_read(&thread);
             app.open_chat(thread.clone(), name, LoadedChat {
                 messages,
                 delivered,
@@ -928,7 +940,11 @@ async fn execute_cmd<S: Store>(
             app.view = View::ContactBrowser;
         }
         AppCmd::RefreshThreadList => {
-            let threads = signal::list_threads(manager, &app.data_dir, app.own_aci).await?;
+            let mut threads = signal::list_threads(manager, &app.data_dir, app.own_aci).await?;
+            // The store cannot know what the user has seen; keep this session's flags.
+            for entry in &mut threads {
+                entry.unread = app.threads.iter().any(|old| old.unread && old.thread == entry.thread);
+            }
             app.threads = threads;
             // Clamp selection so it stays valid after the list changes.
             let new_len = app.threads.len();
@@ -1281,7 +1297,13 @@ pub async fn run<S: Store>(
                     if let Some(received) = event {
                         if let Received::Content(content) = &received {
                             let names = signal::mention_names(&manager, content).await;
-                            app.on_signal(content, &names);
+                            if let Some(update) = signal::extract_update(content, |u| signal::name_or_uuid(&names, u)) {
+                                let from_self = app.own_aci == Some(content.metadata.sender.raw_uuid());
+                                if let Some(update) = app.apply_update(update, from_self) {
+                                    let name = signal::thread_title(&manager, &update.thread).await;
+                                    app.add_thread(update, name, from_self);
+                                }
+                            }
                         }
                         // Reload chat messages and receipt state on any incoming event.
                         if matches!(app.view, View::ChatWindow)
