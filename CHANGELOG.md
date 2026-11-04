@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
 ### Added
+- `sst send` hands the message to a running TUI or `sst watch` over a local socket (`sst.sock` in the data directory), so two processes never write Signal session state at the same time. With nothing running it sends directly as before, and it waits up to 30 seconds for an instance that is still starting. A message sent this way appears in the TUI immediately.
 - `sst send` turns `@Name` into a real mention like the TUI. `sst watch` prints edits as they arrive, marked `(edited)` in text output and with an `edit_of` field in JSON.
 - The chat header shows the thread's disappearing-message timer when one is set.
 - Mentions: an `@Name` in the message (Tab-completed or typed) is sent as a Signal mention, so the member's client highlights it and notifies them. Applies to new messages, replies and edits. Replies quote the original text with its mentions intact.

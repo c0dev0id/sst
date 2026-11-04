@@ -79,6 +79,21 @@ pub struct MessageUpdate {
     pub edit_of: Option<u64>, // for an edit, the timestamp of the message it replaces
 }
 
+/// A thread from its CLI form: a contact UUID or a 64-char hex group master key.
+pub fn parse_thread_id(s: &str) -> anyhow::Result<Thread> {
+    if let Ok(uuid) = s.parse::<Uuid>() {
+        return Ok(Thread::Contact(ServiceId::Aci(uuid.into())));
+    }
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        let bytes: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16))
+            .collect::<Result<_, _>>()?;
+        let key: [u8; 32] = bytes.try_into().expect("32 bytes");
+        return Ok(Thread::Group(key));
+    }
+    anyhow::bail!("invalid recipient '{s}': expected a UUID (contact) or 64-char hex string (group)")
+}
+
 pub(crate) fn sort_recent_first(entries: &mut [ThreadEntry]) {
     entries.sort_by_key(|e| std::cmp::Reverse(e.last_ts));
 }
@@ -1233,13 +1248,14 @@ pub async fn send_edit<S: Store>(
     dispatch_send_body(manager, thread, edit, ts).await
 }
 
+/// Send a message; returns its timestamp.
 pub async fn send_to_thread<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     text: String,
     body_ranges: Vec<BodyRange>,
     attachments: Vec<AttachmentPointer>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<u64> {
     let ts = now_millis()?;
     let data_message = DataMessage {
         body: if text.is_empty() { None } else { Some(text) },
@@ -1248,7 +1264,38 @@ pub async fn send_to_thread<S: Store>(
         attachments,
         ..Default::default()
     };
-    dispatch_send(manager, thread, data_message, ts).await
+    dispatch_send(manager, thread, data_message, ts).await?;
+    Ok(ts)
+}
+
+/// Send text and files to a thread, with `@Name` mentions resolved against the
+/// thread's roster. Returns the message timestamp.
+pub async fn send_text<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    text: &str,
+    attachments: &[PathBuf],
+) -> anyhow::Result<u64> {
+    if text.is_empty() && attachments.is_empty() {
+        anyhow::bail!("nothing to send (no text and no attachments)");
+    }
+    let staged = attachments
+        .iter()
+        .map(|path| stage_attachment(path).map_err(|e| anyhow::anyhow!(e)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let pointers = if staged.is_empty() {
+        Vec::new()
+    } else {
+        upload_staged_attachments(manager, &staged).await.map_err(|(msg, _)| anyhow::anyhow!(msg))?
+    };
+    // Mentions need the roster; skip those lookups when there is nothing to match.
+    let (body, body_ranges) = if text.contains('@') {
+        let names = load_sender_names(manager, thread, Some(own_aci(manager)), None).await;
+        encode_mentions(text, &names)
+    } else {
+        (text.to_string(), Vec::new())
+    };
+    send_to_thread(manager, thread, body, body_ranges, pointers).await
 }
 
 pub async fn send_reply<S: Store>(
@@ -1649,6 +1696,14 @@ mod tests {
         assert_eq!(fmt_duration(300), "5 minutes");
         assert_eq!(fmt_duration(30), "30 seconds");
         assert_eq!(fmt_duration(90), "90 seconds");
+    }
+
+    #[test]
+    fn thread_ids_parse_as_contact_or_group() {
+        assert!(matches!(parse_thread_id("11111111-1111-1111-1111-111111111111"), Ok(Thread::Contact(_))));
+        assert!(matches!(parse_thread_id(&"ab".repeat(32)), Ok(Thread::Group(_))));
+        assert!(parse_thread_id("not-a-recipient").is_err());
+        assert!(parse_thread_id(&"zz".repeat(32)).is_err());
     }
 
     #[test]

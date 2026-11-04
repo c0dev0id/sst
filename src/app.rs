@@ -15,6 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
+use crate::ipc;
 use crate::signal::{self, ReactionMap, StagedAttachment, ThreadEntry, MessageUpdate};
 
 pub enum View {
@@ -947,6 +948,21 @@ async fn fold_live_message<S: Store>(app: &mut App, manager: &Manager<S, Registe
     }
 }
 
+/// Carry out a send that arrived over the socket, then show the message as if
+/// it had arrived live.
+async fn handle_send_job<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>, job: ipc::SendJob) {
+    let result = ipc::perform(manager, &job.request).await;
+    if let Ok((thread, ts)) = &result {
+        if app.chat.as_ref().is_some_and(|c| &c.thread == thread) {
+            reload_chat(manager, thread, &mut app.chat).await;
+        }
+        if let Ok(Some(content)) = manager.store().message(thread, *ts).await {
+            fold_live_message(app, manager, &content).await;
+        }
+    }
+    job.finish(result.map(|_| ()));
+}
+
 /// Send read receipts for the open chat's messages from others that have not
 /// been acknowledged this session, and remember them.
 async fn ack_unseen<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) {
@@ -1071,7 +1087,7 @@ async fn execute_cmd<S: Store>(
             } else if let Some(quoted) = quoted {
                 signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await
             } else {
-                signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await
+                signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await.map(|_| ())
             };
             match sent {
                 Ok(()) => {
@@ -1288,6 +1304,8 @@ pub async fn run<S: Store>(
         original_hook(info);
     }));
 
+    let (mut send_jobs, _send_socket) = ipc::serve(&data_dir)?;
+
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(
@@ -1323,6 +1341,9 @@ pub async fn run<S: Store>(
                         Some(Err(e)) => return Err(anyhow::anyhow!(e)),
                         _ => {}
                     }
+                }
+                Some(job) = send_jobs.recv() => {
+                    handle_send_job(&mut app, &mut manager, job).await;
                 }
                 event = next_or_pending(&mut signal_stream) => {
                     if let Some(received) = event {

@@ -1,4 +1,5 @@
 mod app;
+mod ipc;
 mod signal;
 mod ui;
 
@@ -11,12 +12,11 @@ use presage::libsignal_service::content::Content;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::libsignal_service::prelude::Uuid;
-use presage::libsignal_service::protocol::ServiceId;
 use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::Manager;
 use presage_store_sqlite::SqliteStore;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::error;
 
 // OpenBSD default stack limit is 4MB which is insufficient for the PQ ratchet
@@ -142,40 +142,14 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     let data_dir = db_path.parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
 
-    // Interactive and streaming subcommands need the Signal session to
-    // themselves. print and print-last take the lock when it is free so they
-    // can sync first; when another instance holds it, that instance keeps the
-    // store current and they read it as is. send never takes the lock so a
-    // script can reply while `sst watch` streams.
-    let lock_mode = match args.cmd {
-        Some(Cmd::Send { .. }) => LockMode::Never,
-        Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. }) => LockMode::IfFree,
-        _ => LockMode::Required,
-    };
-
-    // lock_holder must live at the same scope as _lock_guard so the guard's
-    // borrow into it stays valid for the whole run_inner call.
-    let mut lock_holder: fd_lock::RwLock<std::fs::File>;
-    let lock_guard = if lock_mode == LockMode::Never {
-        None
-    } else {
-        let lock_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(data_dir.join("sst.lock"))
-            .context("failed to open lock file")?;
-        lock_holder = fd_lock::RwLock::new(lock_file);
-        match lock_holder.try_write() {
-            Ok(guard) => Some(guard),
-            Err(_) if lock_mode == LockMode::IfFree => None,
-            Err(_) => anyhow::bail!(
-                "another sst instance is already running\n\
-                 (only one instance may use the Signal session at a time)"
-            ),
+    let outcome = match args.cmd {
+        Some(Cmd::Send { recipient, text, attach }) => {
+            let request = ipc::SendRequest::new(recipient, send_text_from(text)?, attach)?;
+            send(request, db_path, data_dir).await
         }
+        cmd => run_locked(cmd, db_path, data_dir).await,
     };
-    match run_inner(args.cmd, db_path, data_dir, lock_guard.is_some()).await {
+    match outcome {
         Ok(()) => Ok(()),
         Err(e) => {
             if let Some(hint) = signal::relink_hint(&e) {
@@ -188,11 +162,78 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum LockMode {
-    Required,
-    IfFree,
-    Never,
+/// The message text for `sst send`: the argument, or stdin when it is omitted.
+fn send_text_from(arg: Option<String>) -> anyhow::Result<String> {
+    if let Some(text) = arg {
+        return Ok(text);
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+    Ok(buf.trim_end_matches(['\n', '\r']).to_string())
+}
+
+fn open_lock_file(data_dir: &Path) -> anyhow::Result<fd_lock::RwLock<std::fs::File>> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(data_dir.join("sst.lock"))
+        .context("failed to open lock file")?;
+    Ok(fd_lock::RwLock::new(file))
+}
+
+/// Run a subcommand that uses the store directly. Interactive and streaming
+/// subcommands need the Signal session to themselves and fail if another
+/// instance holds the lock. print and print-last take the lock when it is free
+/// so they can sync first; when another instance holds it, that instance keeps
+/// the store current and they read it as is.
+async fn run_locked(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
+    let read_only_is_fine = matches!(cmd, Some(Cmd::Print { .. }) | Some(Cmd::PrintLast { .. }));
+    let mut lock = open_lock_file(&data_dir)?;
+    let lock_guard = match lock.try_write() {
+        Ok(guard) => Some(guard),
+        Err(_) if read_only_is_fine => None,
+        Err(_) => anyhow::bail!(
+            "another sst instance is already running\n\
+             (only one instance may use the Signal session at a time)"
+        ),
+    };
+    run_inner(cmd, db_path, data_dir, lock_guard.is_some()).await
+}
+
+/// How long `sst send` keeps trying while another instance holds the session
+/// without serving the send socket yet (starting up, or a short-lived subcommand).
+const SEND_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hand the message to the running session holder over the send socket, or,
+/// when no instance is running, take the lock and send directly.
+async fn send(request: ipc::SendRequest, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
+    let socket = ipc::socket_path(&data_dir);
+    let mut lock = open_lock_file(&data_dir)?;
+    let deadline = std::time::Instant::now() + SEND_WAIT;
+    loop {
+        if let Some(outcome) = ipc::request_send(&socket, &request)? {
+            return outcome.map_err(|e| anyhow::anyhow!(e));
+        }
+        if let Ok(_guard) = lock.try_write() {
+            return send_direct(request, db_path, data_dir).await;
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("another sst instance holds the Signal session but is not accepting sends");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn send_direct(request: ipc::SendRequest, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
+    let store = open_store(&db_path, &data_dir).await?;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut manager = load_manager(store).await?;
+            ipc::perform(&mut manager, &request).await?;
+            Ok(())
+        })
+        .await
 }
 
 /// `may_sync`: whether this process holds the instance lock and may therefore
@@ -219,6 +260,13 @@ async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf, may_sy
         eprintln!("Database wiped. Linking new device…");
     }
 
+    let store = open_store(&db_path, &data_dir).await?;
+    let local = tokio::task::LocalSet::new();
+    local.run_until(run(cmd, store, data_dir, may_sync)).await
+}
+
+/// Start logging into the data directory and open the store.
+async fn open_store(db_path: &Path, data_dir: &Path) -> anyhow::Result<SqliteStore> {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -232,16 +280,19 @@ async fn run_inner(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf, may_sy
         .with_env_filter(filter)
         .init();
 
-    let store = SqliteStore::open_with_passphrase(
+    SqliteStore::open_with_passphrase(
         db_path.to_str().context("non-UTF-8 db path")?,
         None::<&str>,
         OnNewIdentity::Trust,
     )
     .await
-    .context("failed to open store")?;
+    .context("failed to open store")
+}
 
-    let local = tokio::task::LocalSet::new();
-    local.run_until(run(cmd, store, data_dir, may_sync)).await
+async fn load_manager<S: Store>(store: S) -> anyhow::Result<Manager<S, Registered>> {
+    Manager::load_registered(store)
+        .await
+        .map_err(|_| anyhow::anyhow!("No existing registration found. Run `sst link` to link this device."))
 }
 
 async fn run<S: Store>(
@@ -253,11 +304,7 @@ async fn run<S: Store>(
     let mut manager = if matches!(cmd, Some(Cmd::Link)) {
         link_device(store).await?
     } else {
-        Manager::load_registered(store).await.map_err(|_| {
-            anyhow::anyhow!(
-                "No existing registration found. Run `sst link` to link this device."
-            )
-        })?
+        load_manager(store).await?
     };
 
     let mut state = signal::SyncState { data_dir, own_aci: None };
@@ -337,7 +384,7 @@ async fn run<S: Store>(
             if may_sync {
                 signal::sync(&mut manager, &mut state).await?;
             }
-            let thread = parse_thread_id(&recipient)?;
+            let thread = signal::parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             print_messages(&mut manager, &thread, &messages, &format).await;
             Ok(())
@@ -347,7 +394,7 @@ async fn run<S: Store>(
             if may_sync {
                 signal::sync(&mut manager, &mut state).await?;
             }
-            let thread = parse_thread_id(&recipient)?;
+            let thread = signal::parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread).await?;
             let start = messages.len().saturating_sub(count);
             print_messages(&mut manager, &thread, &messages[start..], &format).await;
@@ -355,7 +402,8 @@ async fn run<S: Store>(
         }
 
         Some(Cmd::Watch { format, recipient }) => {
-            let thread = parse_thread_id(&recipient)?;
+            let thread = signal::parse_thread_id(&recipient)?;
+            let (mut send_jobs, _send_socket) = ipc::serve(&state.data_dir)?;
             // BTreeSet allows evicting entries older than the dedup window in O(log n).
             let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
             let mut names = signal::load_sender_names(&mut manager, &thread, None, None).await;
@@ -371,66 +419,40 @@ async fn run<S: Store>(
                     }
                 });
 
-                while let Some(event) = stream.next().await {
-                    let Received::Content(boxed) = event else { continue };
-                    cache_mentioned_names(&mut names, &manager, &boxed).await;
-                    let Some(update) = signal::extract_update(&boxed, |u| signal::name_or_uuid(&names, u)) else {
-                        continue;
-                    };
-                    if update.thread != thread || update.ts < start_ts { continue; }
-                    // Evict timestamps older than 60 s to keep the dedup set bounded.
-                    let horizon = update.ts.saturating_sub(60_000);
-                    while seen.first().is_some_and(|&t| t < horizon) {
-                        seen.pop_first();
+                loop {
+                    tokio::select! {
+                        Some(job) = send_jobs.recv() => {
+                            let result = ipc::perform(&mut manager, &job.request).await;
+                            job.finish(result.map(|_| ()));
+                        }
+                        event = stream.next() => {
+                            let Some(event) = event else { break };
+                            let Received::Content(boxed) = event else { continue };
+                            cache_mentioned_names(&mut names, &manager, &boxed).await;
+                            let Some(update) = signal::extract_update(&boxed, |u| signal::name_or_uuid(&names, u)) else {
+                                continue;
+                            };
+                            if update.thread != thread || update.ts < start_ts { continue; }
+                            // Evict timestamps older than 60 s to keep the dedup set bounded.
+                            let horizon = update.ts.saturating_sub(60_000);
+                            while seen.first().is_some_and(|&t| t < horizon) {
+                                seen.pop_first();
+                            }
+                            if !seen.insert(update.ts) { continue; }
+                            let sender_uuid = boxed.metadata.sender.raw_uuid();
+                            let sender_name = cached_sender_name(&mut names, &manager, sender_uuid).await;
+                            let line = format_one(&format, update.ts, sender_uuid, &sender_name, &update.preview, update.edit_of);
+                            println!("{}", line);
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        }
                     }
-                    if !seen.insert(update.ts) { continue; }
-                    let sender_uuid = boxed.metadata.sender.raw_uuid();
-                    let sender_name = cached_sender_name(&mut names, &manager, sender_uuid).await;
-                    let line = format_one(&format, update.ts, sender_uuid, &sender_name, &update.preview, update.edit_of);
-                    println!("{}", line);
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
 
-        Some(Cmd::Send { recipient, text, attach }) => {
-            let thread = parse_thread_id(&recipient)?;
-            let text = if let Some(t) = text {
-                t
-            } else {
-                let mut buf = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                buf.trim_end_matches(['\n', '\r']).to_string()
-            };
-            if text.is_empty() && attach.is_empty() {
-                anyhow::bail!("nothing to send (no text and no attachments)");
-            }
-            let mut staged = Vec::new();
-            for path in &attach {
-                staged.push(
-                    signal::stage_attachment(path)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                );
-            }
-            let pointers = if staged.is_empty() {
-                Vec::new()
-            } else {
-                signal::upload_staged_attachments(&mut manager, &staged).await
-                    .map_err(|(msg, _)| anyhow::anyhow!("{}", msg))?
-            };
-            // Mentions need the roster; skip those lookups when there is nothing to match.
-            let (body, body_ranges) = if text.contains('@') {
-                let own = signal::own_aci(&manager);
-                let names = signal::load_sender_names(&mut manager, &thread, Some(own), None).await;
-                signal::encode_mentions(&text, &names)
-            } else {
-                (text, Vec::new())
-            };
-            signal::send_to_thread(&mut manager, &thread, body, body_ranges, pointers).await?;
-            Ok(())
-        }
+        Some(Cmd::Send { .. }) => unreachable!("send is handled before the store is opened"),
     }
 }
 
@@ -527,23 +549,6 @@ fn hex_string(bytes: &[u8]) -> String {
 }
 
 // ── Thread parsing ────────────────────────────────────────────────────────────
-
-fn parse_thread_id(s: &str) -> anyhow::Result<Thread> {
-    if let Ok(uuid) = s.parse::<Uuid>() {
-        return Ok(Thread::Contact(ServiceId::Aci(uuid.into())));
-    }
-    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-        let bytes: Vec<u8> = (0..32)
-            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16))
-            .collect::<Result<_, _>>()?;
-        let key: [u8; 32] = bytes.try_into().expect("32 bytes");
-        return Ok(Thread::Group(key));
-    }
-    anyhow::bail!(
-        "invalid recipient '{}': expected a UUID (contact) or 64-char hex string (group)",
-        s
-    )
-}
 
 // ── Device linking ────────────────────────────────────────────────────────────
 
