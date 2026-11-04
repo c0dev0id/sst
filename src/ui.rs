@@ -171,8 +171,9 @@ fn draw_chat_window_screen(f: &mut Frame, app: &mut App) {
     draw_chat_header(f, app, chunks[0]);
     draw_messages(f, app, chunks[1]);
 
-    let status = chat_status_bar(app);
-    draw_status_bar(f, chunks[2], &status);
+    let hint = chat_status_bar(app);
+    let text = status_or(app, &hint);
+    draw_status_bar(f, chunks[2], &text);
     if att_height > 0 {
         draw_attachment_bar(f, app, chunks[3]);
     }
@@ -492,10 +493,6 @@ fn chat_status_bar(app: &App) -> String {
         Some(c) => c,
         None => return String::new(),
     };
-
-    if let Some(hint) = &chat.status {
-        return format!("  {}", hint);
-    }
 
     match &chat.mode {
         Mode::Normal => {

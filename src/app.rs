@@ -58,7 +58,6 @@ pub struct ChatState {
     pub selected_message: Option<usize>,   // index into `messages`
     pub delivered: HashSet<u64>,           // timestamps of our messages confirmed delivered
     pub read: HashSet<u64>,                // timestamps of our messages confirmed read
-    pub status: Option<String>,            // transient status line (completion, errors, progress); cleared by the next key
     pub reactions: ReactionMap,
     pub mode: Mode,
     pub reply_to: Option<usize>,           // message index set by 'r' in Normal mode
@@ -118,7 +117,7 @@ pub enum AppCmd {
 pub struct App {
     pub threads: Vec<ThreadEntry>,
     pub list_state: ListState,
-    pub status: Option<String>, // message shown on the list/contact status bar until the next key
+    pub status: Option<String>, // transient status line: completion candidates, errors, progress; cleared by the next key (Tab keeps it)
     pub acked: HashSet<u64>,    // messages read-receipted this session
     pub quit: bool,
     pub view: View,
@@ -166,7 +165,6 @@ impl App {
             selected_message: None,
             delivered: view.delivered,
             read: view.read,
-            status: None,
             reactions: view.reactions,
             mode: Mode::Normal,
             reply_to: None,
@@ -212,6 +210,10 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return None;
         }
+        // Tab keeps completion candidates on the bar; any other key starts fresh.
+        if !(matches!(self.view, View::ChatWindow) && key.code == KeyCode::Tab) {
+            self.status = None;
+        }
         match self.view {
             View::ChatList => self.on_key_list(key),
             View::ChatWindow => self.on_key_chat(key),
@@ -221,16 +223,12 @@ impl App {
 
     /// Show a failed command's error where the user is looking, and log it.
     pub fn show_error(&mut self, err: &anyhow::Error) {
-        tracing::warn!("{err:#}");
         let text = format!("{err:#}");
-        match &mut self.chat {
-            Some(chat) => chat.status = Some(text),
-            None => self.status = Some(text),
-        }
+        tracing::warn!("{text}");
+        self.status = Some(text);
     }
 
     fn on_key_list(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
-        self.status = None;
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => { self.quit = true; None }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -284,9 +282,6 @@ impl App {
         let own_aci = self.own_aci;
         let chat = self.chat.as_mut()?;
 
-        if key.code != KeyCode::Tab {
-            chat.status = None;
-        }
         if chat.pending_d && (!matches!(chat.mode, Mode::Normal) || key.code != KeyCode::Char('d')) {
             chat.pending_d = false;
         }
@@ -332,11 +327,11 @@ impl App {
                             chat.cursor = chat.input.len();
                             chat.mode = Mode::Insert;
                         } else {
-                            chat.status = Some(HINT_SELECT_FIRST.to_string());
+                            self.status = Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
                     KeyCode::Char('e') => match mutable_selection(chat, own_aci, "edit") {
-                        Err(why) => chat.status = Some(why),
+                        Err(why) => self.status = Some(why),
                         Ok(content) => {
                             let ts = content.timestamp();
                             // Roster names only: a label like "Attachment" or "You" would be sent as text.
@@ -355,16 +350,16 @@ impl App {
                                 chat.selected_attachment = clamp_selection(att_idx, chat.staged_attachments.len());
                             } else {
                                 chat.pending_d = true;
-                                chat.status = Some("d again to remove attachment".to_string());
+                                self.status = Some("d again to remove attachment".to_string());
                             }
                         } else if let Err(why) = mutable_selection(chat, own_aci, "delete") {
-                            chat.status = Some(why);
+                            self.status = Some(why);
                         } else if chat.pending_d {
                             chat.pending_d = false;
                             return Some(AppCmd::DeleteMessage);
                         } else {
                             chat.pending_d = true;
-                            chat.status = Some("d again to delete for everyone".to_string());
+                            self.status = Some("d again to delete for everyone".to_string());
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -474,10 +469,10 @@ impl App {
                                 let rep = span.values[0].clone();
                                 chat.input.replace_range(span.start..span.end, &rep);
                                 chat.cursor = span.start + rep.len();
-                                chat.status = None;
+                                self.status = None;
                             } else {
                                 let labels = span.display.as_deref().unwrap_or(&span.values);
-                                chat.status = Some(labels.join("  "));
+                                self.status = Some(labels.join("  "));
                             }
                         }
                     }
@@ -503,11 +498,11 @@ impl App {
                     KeyCode::Tab => {
                         if let Some((name, arg)) = cmd_so_far.split_once(' ') {
                             // Argument completion: dispatch on the registered ArgKind.
-                            match COLON_COMMANDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k) {
+                            self.status = match COLON_COMMANDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k) {
                                 Some(ArgKind::Path)  => apply_path_completion(name, arg, chat),
                                 Some(ArgKind::Emoji) => apply_emoji_completion(name, arg, chat),
-                                Some(ArgKind::None) | None => {}
-                            }
+                                Some(ArgKind::None) | None => None,
+                            };
                         } else {
                             // Base-name completion: no argument typed yet.
                             let partial = cmd_so_far.to_lowercase();
@@ -518,9 +513,9 @@ impl App {
                                 .collect();
                             if matches.len() == 1 {
                                 chat.mode = Mode::Command(matches[0].to_string());
-                                chat.status = None;
+                                self.status = None;
                             } else if !matches.is_empty() {
-                                chat.status = Some(
+                                self.status = Some(
                                     matches.iter().map(|c| format!(":{}", c)).collect::<Vec<_>>().join("  ")
                                 );
                             }
@@ -544,7 +539,6 @@ impl App {
     }
 
     fn on_key_contacts(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
-        self.status = None;
         // Whether a separator row exists between contacts and groups.
         let has_sep = self.contacts_split > 0 && self.contacts_split < self.contacts.len();
         let total = self.contacts.len() + if has_sep { 1 } else { 0 };
@@ -814,10 +808,12 @@ fn complete_path(partial: &str) -> Vec<String> {
     results
 }
 
-fn apply_emoji_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
+/// Complete the emoji shortcode argument in place on a unique match; otherwise
+/// return the candidates to show.
+fn apply_emoji_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) -> Option<String> {
     let partial = partial.trim_start();
     if partial.is_empty() || !partial.is_ascii() {
-        return;
+        return None;
     }
     let partial_lower = partial.to_lowercase();
     let mut matches: Vec<&str> = emojis::iter()
@@ -826,24 +822,24 @@ fn apply_emoji_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
         .collect();
     matches.sort_unstable();
     match matches.len() {
-        0 => {}
+        0 => None,
         1 => {
             chat.mode = Mode::Command(format!("{} {}", cmd_name, matches[0]));
-            chat.status = None;
+            None
         }
-        _ => {
-            chat.status = Some(matches.join("  "));
-        }
+        _ => Some(matches.join("  ")),
     }
 }
 
-fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
+/// Complete the path argument in place on a unique match; otherwise return the
+/// candidates to show.
+fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) -> Option<String> {
     let completions = complete_path(partial.trim_start());
     match completions.len() {
-        0 => {}
+        0 => None,
         1 => {
             chat.mode = Mode::Command(format!("{} {}", cmd_name, completions[0]));
-            chat.status = None;
+            None
         }
         _ => {
             let labels: Vec<String> = completions.iter()
@@ -853,7 +849,7 @@ fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
                     if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
                 })
                 .collect();
-            chat.status = Some(labels.join("  "));
+            Some(labels.join("  "))
         }
     }
 }
@@ -1122,9 +1118,7 @@ async fn execute_cmd<S: Store>(
                     } else {
                         "no message selected".to_string()
                     };
-                    if let Some(chat) = &mut app.chat {
-                        chat.status = Some(hint);
-                    }
+                    app.status = Some(hint);
                 }
                 Some(ColonCmd::React(arg)) => {
                     if let Some((target_ts, target_author)) = react_target {
@@ -1137,18 +1131,16 @@ async fn execute_cmd<S: Store>(
                                 .unwrap_or(false);
                             signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
                             reload_chat(manager, &thread, &mut app.chat).await;
-                        } else if let Some(chat) = &mut app.chat {
-                            chat.status = Some(format!("unknown emoji: {}", arg));
+                        } else {
+                            app.status = Some(format!("unknown emoji: {}", arg));
                         }
-                    } else if let Some(chat) = &mut app.chat {
-                        chat.status = Some("no message selected".to_string());
+                    } else {
+                        app.status = Some("no message selected".to_string());
                     }
                 }
                 Some(ColonCmd::Upload(path)) => {
                     if path.is_empty() {
-                        if let Some(chat) = &mut app.chat {
-                            chat.status = Some(":upload <path>".to_string());
-                        }
+                        app.status = Some(":upload <path>".to_string());
                     } else {
                         match signal::stage_attachment(std::path::Path::new(path)) {
                             Ok(att) => {
@@ -1157,9 +1149,7 @@ async fn execute_cmd<S: Store>(
                                 }
                             }
                             Err(msg) => {
-                                if let Some(chat) = &mut app.chat {
-                                    chat.status = Some(msg);
-                                }
+                                app.status = Some(msg);
                             }
                         }
                     }
@@ -1171,9 +1161,7 @@ async fn execute_cmd<S: Store>(
                             None => return Ok(()),
                         };
                         let Some(idx) = chat.selected_message else {
-                            if let Some(c) = &mut app.chat {
-                                c.status = Some(HINT_SELECT_FIRST.to_string());
-                            }
+                            app.status = Some(HINT_SELECT_FIRST.to_string());
                             return Ok(());
                         };
                         let atts = chat.messages.get(idx)
@@ -1182,9 +1170,7 @@ async fn execute_cmd<S: Store>(
                         (chat.thread_name.clone(), atts)
                     };
                     if atts.is_empty() {
-                        if let Some(c) = &mut app.chat {
-                            c.status = Some("no attachments on selected message".to_string());
-                        }
+                        app.status = Some("no attachments on selected message".to_string());
                         return Ok(());
                     }
                     let dir = resolve_download_dir(path_arg, &thread_name)?;
@@ -1193,23 +1179,19 @@ async fn execute_cmd<S: Store>(
                     let total = atts.len();
                     for (i, pointer) in atts.iter().enumerate() {
                         if total > 1 {
-                            if let Some(c) = &mut app.chat {
-                                c.status = Some(format!("downloading {}/{}…", i + 1, total));
-                            }
+                            app.status = Some(format!("downloading {}/{}…", i + 1, total));
                             terminal.draw(|f| crate::ui::draw(f, app))?;
                         }
                         let filename = signal::attachment_filename(pointer, i);
                         match signal::download_attachment(manager, pointer, &dir, &filename).await {
                             Ok(_) => {}
                             Err(e) => {
-                                if let Some(c) = &mut app.chat { c.status = Some(e); }
+                                if let Some(c) = &mut app.chat { app.status = Some(e); }
                                 return Ok(());
                             }
                         }
                     }
-                    if let Some(c) = &mut app.chat {
-                        c.status = Some(format!("saved {} file(s) to {}", total, dir.display()));
-                    }
+                    app.status = Some(format!("saved {} file(s) to {}", total, dir.display()));
                 }
                 Some(ColonCmd::DownloadAll(path_arg)) => {
                     let thread_name = match app.chat.as_ref() {
@@ -1236,9 +1218,7 @@ async fn execute_cmd<S: Store>(
                         }
                     }
                     if downloads.is_empty() {
-                        if let Some(c) = &mut app.chat {
-                            c.status = Some("no attachments in this chat".to_string());
-                        }
+                        app.status = Some("no attachments in this chat".to_string());
                         return Ok(());
                     }
                     let total_files = downloads.len();
@@ -1247,34 +1227,26 @@ async fn execute_cmd<S: Store>(
                     std::fs::create_dir_all(&dir)
                         .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
                     for (i, (filename, pointer, msg_num)) in downloads.iter().enumerate() {
-                        if let Some(c) = &mut app.chat {
-                            c.status = Some(format!(
+                        app.status = Some(format!(
                                 "downloading {}/{} (message {}/{})…",
                                 i + 1, total_files, msg_num, total_msgs
                             ));
-                        }
                         terminal.draw(|f| crate::ui::draw(f, app))?;
                         match signal::download_attachment(manager, pointer, &dir, filename).await {
                             Ok(_) => {}
                             Err(e) => {
-                                if let Some(c) = &mut app.chat {
-                                    c.status = Some(format!("file {}: {}", i + 1, e));
-                                }
+                                app.status = Some(format!("file {}: {}", i + 1, e));
                                 return Ok(());
                             }
                         }
                     }
-                    if let Some(c) = &mut app.chat {
-                        c.status = Some(format!(
+                    app.status = Some(format!(
                             "saved {} file(s) to {}",
                             total_files, dir.display()
                         ));
-                    }
                 }
                 None => {
-                    if let Some(chat) = &mut app.chat {
-                        chat.status = Some(format!("unknown command: :{}", cmd_text));
-                    }
+                    app.status = Some(format!("unknown command: :{}", cmd_text));
                 }
             }
         }
