@@ -13,7 +13,7 @@ use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
-use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, body_range::AssociatedValue, data_message, receipt_message, sync_message::Sent};
+use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, body_range::AssociatedValue, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::Sent};
 use presage::libsignal_service::sender::AttachmentSpec;
 
 /// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
@@ -780,27 +780,33 @@ fn word_ends(after: &str) -> bool {
     after.chars().next().is_none_or(|c| !c.is_alphanumeric())
 }
 
-/// What a reply quotes: the original's timestamp, author, text and mention ranges.
-/// Messages without text quote their display label instead.
+/// What a reply quotes: the original's timestamp, author, text with its mention
+/// ranges, and the type of any media it carried.
 pub struct QuoteRef {
     pub ts: u64,
     pub author: Uuid,
     pub text: Option<String>,
     pub body_ranges: Vec<BodyRange>,
+    pub attachments: Vec<QuotedAttachment>,
 }
 
 pub fn quote_ref(content: &Content) -> QuoteRef {
     let msg = data_message_of(content);
-    let body = msg.and_then(|m| m.body.clone()).filter(|b| !b.is_empty());
-    let text = body.or_else(|| {
-        let label = message_body(content, |u| u.to_string());
-        (!label.is_empty()).then_some(label)
+    let media = msg.into_iter().flat_map(|m| {
+        m.attachments.iter().chain(m.sticker.as_ref().and_then(|s| s.data.as_ref()))
     });
     QuoteRef {
         ts: content.timestamp(),
         author: content.metadata.sender.raw_uuid(),
-        text,
+        text: msg.and_then(|m| m.body.clone()).filter(|b| !b.is_empty()),
         body_ranges: msg.map(|m| m.body_ranges.clone()).unwrap_or_default(),
+        attachments: media
+            .map(|a| QuotedAttachment {
+                content_type: a.content_type.clone(),
+                file_name: a.file_name.clone(),
+                thumbnail: None,
+            })
+            .collect(),
     }
 }
 
@@ -1088,6 +1094,7 @@ pub async fn send_reply<S: Store>(
         author_aci_binary: Some(quoted.author.as_bytes().to_vec()),
         text: quoted.text,
         body_ranges: quoted.body_ranges,
+        attachments: quoted.attachments,
         ..Default::default()
     };
     let data_message = DataMessage {
@@ -1110,8 +1117,12 @@ pub fn message_quote(content: &Content, name_of: impl Fn(Uuid) -> String) -> Opt
     } else {
         Uuid::parse_str(quote.author_aci.as_deref()?).ok()?
     };
-    let text = quote.text.as_deref().unwrap_or_default();
-    Some((author, substitute_mentions(text, &quote.body_ranges, name_of)))
+    let text = match quote.text.as_deref() {
+        Some(text) if !text.is_empty() => substitute_mentions(text, &quote.body_ranges, name_of),
+        _ if !quote.attachments.is_empty() => "Attachment".to_string(),
+        _ => String::new(),
+    };
+    Some((author, text))
 }
 
 /// Returns (delivered_timestamps, read_timestamps) for our sent messages in this thread.
