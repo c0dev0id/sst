@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
 ### Fixed
+- A failed attachment upload no longer discards the typed message, reply target or edit in progress; only the failed file is removed from the attachment bar.
+- Quote previews in group chats show the quoted author's name instead of a UUID.
+- Replying to a photo, file or sticker quotes it as media, so the other side shows a media quote instead of the literal word "Attachment".
+- `print`, `print-last` and `watch` resolve group member names the same way the TUI does, including members missing from the contact store; previously those printed as UUIDs.
 - Incoming mentions showed a placeholder glyph where the name belongs. Mentions now render as `@Name` in the chat window, quote previews, the chat list preview, and `print`/`watch` output. Edited messages keep their mentions.
 - Replies sent from another linked device now show their quote preview; previously only replies received from others did.
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
