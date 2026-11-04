@@ -51,7 +51,7 @@ pub struct ChatState {
     pub selected_message: Option<usize>,   // index into `messages`
     pub delivered: HashSet<u64>,           // timestamps of our messages confirmed delivered
     pub read: HashSet<u64>,                // timestamps of our messages confirmed read
-    pub autocomplete_hint: Option<String>, // shown on status bar after Tab
+    pub status: Option<String>,            // transient status line (completion, errors, progress); cleared by the next key
     pub reactions: ReactionMap,
     pub mode: Mode,
     pub reply_to: Option<usize>,           // message index set by 'r' in Normal mode
@@ -143,7 +143,7 @@ impl App {
             selected_message: None,
             delivered: data.delivered,
             read: data.read,
-            autocomplete_hint: None,
+            status: None,
             reactions: data.reactions,
             mode: Mode::Normal,
             reply_to: None,
@@ -201,7 +201,7 @@ impl App {
         tracing::warn!("{err:#}");
         let text = format!("{err:#}");
         match &mut self.chat {
-            Some(chat) => chat.autocomplete_hint = Some(text),
+            Some(chat) => chat.status = Some(text),
             None => self.status = Some(text),
         }
     }
@@ -262,7 +262,7 @@ impl App {
         let chat = self.chat.as_mut()?;
 
         if key.code != KeyCode::Tab {
-            chat.autocomplete_hint = None;
+            chat.status = None;
         }
         if chat.pending_d && (!matches!(chat.mode, Mode::Normal) || key.code != KeyCode::Char('d')) {
             chat.pending_d = false;
@@ -309,7 +309,7 @@ impl App {
                             chat.cursor = chat.input.len();
                             chat.mode = Mode::Insert;
                         } else {
-                            chat.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
+                            chat.status = Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
                     KeyCode::Char('e') => {
@@ -319,10 +319,10 @@ impl App {
                                     .is_some_and(|a| a == content.metadata.sender.raw_uuid());
                                 let ts = content.timestamp();
                                 if !is_own {
-                                    chat.autocomplete_hint =
+                                    chat.status =
                                         Some("can only edit own messages".to_string());
                                 } else if signal::outside_edit_window(ts) {
-                                    chat.autocomplete_hint =
+                                    chat.status =
                                         Some("can only edit messages from the last 24 hours".to_string());
                                 } else {
                                     // Roster names only: a label like "Attachment" or "You" would be sent as text.
@@ -334,7 +334,7 @@ impl App {
                                 }
                             }
                         } else {
-                            chat.autocomplete_hint =
+                            chat.status =
                                 Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
@@ -351,25 +351,25 @@ impl App {
                                 };
                             } else {
                                 chat.pending_d = true;
-                                chat.autocomplete_hint = Some("d again to remove attachment".to_string());
+                                chat.status = Some("d again to remove attachment".to_string());
                             }
                         } else if let Some(content) = chat.selected_message.and_then(|i| chat.messages.get(i)) {
                             let is_own = own_aci.is_some_and(|a| a == content.metadata.sender.raw_uuid());
                             let ts = content.timestamp();
                             if !is_own {
-                                chat.autocomplete_hint = Some("can only delete own messages".to_string());
+                                chat.status = Some("can only delete own messages".to_string());
                             } else if signal::outside_edit_window(ts) {
-                                chat.autocomplete_hint =
+                                chat.status =
                                     Some("can only delete messages from the last 24 hours".to_string());
                             } else if chat.pending_d {
                                 chat.pending_d = false;
                                 return Some(AppCmd::DeleteMessage);
                             } else {
                                 chat.pending_d = true;
-                                chat.autocomplete_hint = Some("d again to delete for everyone".to_string());
+                                chat.status = Some("d again to delete for everyone".to_string());
                             }
                         } else {
-                            chat.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
+                            chat.status = Some(HINT_SELECT_FIRST.to_string());
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -479,10 +479,10 @@ impl App {
                                 let rep = span.values[0].clone();
                                 chat.input.replace_range(span.start..span.end, &rep);
                                 chat.cursor = span.start + rep.len();
-                                chat.autocomplete_hint = None;
+                                chat.status = None;
                             } else {
                                 let labels = span.display.as_deref().unwrap_or(&span.values);
-                                chat.autocomplete_hint = Some(labels.join("  "));
+                                chat.status = Some(labels.join("  "));
                             }
                         }
                     }
@@ -523,9 +523,9 @@ impl App {
                                 .collect();
                             if matches.len() == 1 {
                                 chat.mode = Mode::Command(matches[0].to_string());
-                                chat.autocomplete_hint = None;
+                                chat.status = None;
                             } else if !matches.is_empty() {
-                                chat.autocomplete_hint = Some(
+                                chat.status = Some(
                                     matches.iter().map(|c| format!(":{}", c)).collect::<Vec<_>>().join("  ")
                                 );
                             }
@@ -814,10 +814,10 @@ fn apply_emoji_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
         0 => {}
         1 => {
             chat.mode = Mode::Command(format!("{} {}", cmd_name, matches[0]));
-            chat.autocomplete_hint = None;
+            chat.status = None;
         }
         _ => {
-            chat.autocomplete_hint = Some(matches.join("  "));
+            chat.status = Some(matches.join("  "));
         }
     }
 }
@@ -828,7 +828,7 @@ fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
         0 => {}
         1 => {
             chat.mode = Mode::Command(format!("{} {}", cmd_name, completions[0]));
-            chat.autocomplete_hint = None;
+            chat.status = None;
         }
         _ => {
             let labels: Vec<String> = completions.iter()
@@ -838,7 +838,7 @@ fn apply_path_completion(cmd_name: &str, partial: &str, chat: &mut ChatState) {
                     if c.ends_with('/') { format!("{}/", name) } else { name.to_string() }
                 })
                 .collect();
-            chat.autocomplete_hint = Some(labels.join("  "));
+            chat.status = Some(labels.join("  "));
         }
     }
 }
@@ -1015,7 +1015,7 @@ async fn execute_cmd<S: Store>(
                             let len = chat.staged_attachments.len();
                             chat.selected_attachment = if len == 0 { None } else { Some(sel.min(len - 1)) };
                         }
-                        chat.autocomplete_hint = Some(msg);
+                        chat.status = Some(msg);
                         return Ok(());
                     }
                 }
@@ -1053,7 +1053,7 @@ async fn execute_cmd<S: Store>(
                 Err(e) => {
                     // Keep the draft and put the files back so a retry re-uploads them.
                     chat.staged_attachments = staged;
-                    chat.autocomplete_hint = Some(format!("send failed: {e:#}"));
+                    chat.status = Some(format!("send failed: {e:#}"));
                 }
             }
         }
@@ -1084,7 +1084,7 @@ async fn execute_cmd<S: Store>(
                         "no message selected".to_string()
                     };
                     if let Some(chat) = &mut app.chat {
-                        chat.autocomplete_hint = Some(hint);
+                        chat.status = Some(hint);
                     }
                 }
                 Some(ColonCmd::React(arg)) => {
@@ -1099,16 +1099,16 @@ async fn execute_cmd<S: Store>(
                             signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
                             reload_chat(manager, &thread, &mut app.chat).await;
                         } else if let Some(chat) = &mut app.chat {
-                            chat.autocomplete_hint = Some(format!("unknown emoji: {}", arg));
+                            chat.status = Some(format!("unknown emoji: {}", arg));
                         }
                     } else if let Some(chat) = &mut app.chat {
-                        chat.autocomplete_hint = Some("no message selected".to_string());
+                        chat.status = Some("no message selected".to_string());
                     }
                 }
                 Some(ColonCmd::Upload(path)) => {
                     if path.is_empty() {
                         if let Some(chat) = &mut app.chat {
-                            chat.autocomplete_hint = Some(":upload <path>".to_string());
+                            chat.status = Some(":upload <path>".to_string());
                         }
                     } else {
                         match signal::stage_attachment(std::path::Path::new(path)) {
@@ -1119,7 +1119,7 @@ async fn execute_cmd<S: Store>(
                             }
                             Err(msg) => {
                                 if let Some(chat) = &mut app.chat {
-                                    chat.autocomplete_hint = Some(msg);
+                                    chat.status = Some(msg);
                                 }
                             }
                         }
@@ -1133,7 +1133,7 @@ async fn execute_cmd<S: Store>(
                         };
                         let Some(idx) = chat.selected_message else {
                             if let Some(c) = &mut app.chat {
-                                c.autocomplete_hint = Some(HINT_SELECT_FIRST.to_string());
+                                c.status = Some(HINT_SELECT_FIRST.to_string());
                             }
                             return Ok(());
                         };
@@ -1144,7 +1144,7 @@ async fn execute_cmd<S: Store>(
                     };
                     if atts.is_empty() {
                         if let Some(c) = &mut app.chat {
-                            c.autocomplete_hint = Some("no attachments on selected message".to_string());
+                            c.status = Some("no attachments on selected message".to_string());
                         }
                         return Ok(());
                     }
@@ -1155,7 +1155,7 @@ async fn execute_cmd<S: Store>(
                     for (i, pointer) in atts.iter().enumerate() {
                         if total > 1 {
                             if let Some(c) = &mut app.chat {
-                                c.autocomplete_hint = Some(format!("downloading {}/{}…", i + 1, total));
+                                c.status = Some(format!("downloading {}/{}…", i + 1, total));
                             }
                             terminal.draw(|f| crate::ui::draw(f, app))?;
                         }
@@ -1163,13 +1163,13 @@ async fn execute_cmd<S: Store>(
                         match signal::download_attachment(manager, pointer, &dir, &filename).await {
                             Ok(_) => {}
                             Err(e) => {
-                                if let Some(c) = &mut app.chat { c.autocomplete_hint = Some(e); }
+                                if let Some(c) = &mut app.chat { c.status = Some(e); }
                                 return Ok(());
                             }
                         }
                     }
                     if let Some(c) = &mut app.chat {
-                        c.autocomplete_hint = Some(format!("saved {} file(s) to {}", total, dir.display()));
+                        c.status = Some(format!("saved {} file(s) to {}", total, dir.display()));
                     }
                 }
                 Some(ColonCmd::DownloadAll(path_arg)) => {
@@ -1198,7 +1198,7 @@ async fn execute_cmd<S: Store>(
                     }
                     if downloads.is_empty() {
                         if let Some(c) = &mut app.chat {
-                            c.autocomplete_hint = Some("no attachments in this chat".to_string());
+                            c.status = Some("no attachments in this chat".to_string());
                         }
                         return Ok(());
                     }
@@ -1209,7 +1209,7 @@ async fn execute_cmd<S: Store>(
                         .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
                     for (i, (filename, pointer, msg_num)) in downloads.iter().enumerate() {
                         if let Some(c) = &mut app.chat {
-                            c.autocomplete_hint = Some(format!(
+                            c.status = Some(format!(
                                 "downloading {}/{} (message {}/{})…",
                                 i + 1, total_files, msg_num, total_msgs
                             ));
@@ -1219,14 +1219,14 @@ async fn execute_cmd<S: Store>(
                             Ok(_) => {}
                             Err(e) => {
                                 if let Some(c) = &mut app.chat {
-                                    c.autocomplete_hint = Some(format!("file {}: {}", i + 1, e));
+                                    c.status = Some(format!("file {}: {}", i + 1, e));
                                 }
                                 return Ok(());
                             }
                         }
                     }
                     if let Some(c) = &mut app.chat {
-                        c.autocomplete_hint = Some(format!(
+                        c.status = Some(format!(
                             "saved {} file(s) to {}",
                             total_files, dir.display()
                         ));
@@ -1234,7 +1234,7 @@ async fn execute_cmd<S: Store>(
                 }
                 None => {
                     if let Some(chat) = &mut app.chat {
-                        chat.autocomplete_hint = Some(format!("unknown command: :{}", cmd_text));
+                        chat.status = Some(format!("unknown command: :{}", cmd_text));
                     }
                 }
             }

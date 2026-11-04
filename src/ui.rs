@@ -506,7 +506,7 @@ fn chat_status_bar(app: &App) -> String {
         None => return String::new(),
     };
 
-    if let Some(hint) = &chat.autocomplete_hint {
+    if let Some(hint) = &chat.status {
         return format!("  {}", hint);
     }
     let is_group = matches!(chat.thread, presage::store::Thread::Group(_));
