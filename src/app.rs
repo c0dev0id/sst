@@ -581,12 +581,26 @@ impl App {
         };
 
         if let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) {
+            if update.is_edit {
+                // An edit changes text only; it shows in the list if it hit the newest message.
+                if update.ts == entry.last_ts {
+                    entry.last_preview = Some(update.preview);
+                }
+                return;
+            }
+            // Backlog delivery can be out of order; an older message must not replace the preview.
+            if update.ts < entry.last_ts {
+                return;
+            }
             entry.last_preview = Some(update.preview);
             if update.ts > entry.last_ts {
                 entry.last_ts = update.ts;
                 entry.unread = true;
             }
         } else {
+            if update.is_edit {
+                return;
+            }
             let name = match &update.thread {
                 Thread::Contact(sid) => sid.raw_uuid().to_string(),
                 Thread::Group(_) => return,

@@ -73,7 +73,8 @@ impl ThreadEntry {
 pub struct MessageUpdate {
     pub thread: Thread,
     pub preview: String,
-    pub ts: u64,
+    pub ts: u64,      // the message's own timestamp; for an edit, the edited message's
+    pub is_edit: bool,
 }
 
 pub struct SyncState {
@@ -429,20 +430,19 @@ pub async fn connect<S: Store>(
     Ok(stream)
 }
 
+/// The chat-list effect of a live event: the thread's new preview and the
+/// timestamp of the message it describes. Receipts, typing and other bodiless
+/// events yield None so they cannot clear a preview or reorder the list.
 pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Option<MessageUpdate> {
     let thread = Thread::try_from(content).ok()?;
-    // Receipts, typing messages, and other no-body events have no preview.
-    // Bailing here keeps the thread's last_preview and last_ts intact so they
-    // can't clear a visible preview or push the thread to the top.
-    let body = message_body(content, name_of);
-    if body.is_empty() {
+    let (preview, ts, is_edit) = match extract_edit(content) {
+        Some((target_ts, edited)) => (data_message_body(&edited, name_of), target_ts, true),
+        None => (message_body(content, name_of), content.timestamp(), false),
+    };
+    if preview.is_empty() {
         return None;
     }
-    Some(MessageUpdate {
-        thread,
-        preview: body,
-        ts: content.timestamp(),
-    })
+    Some(MessageUpdate { thread, preview, ts, is_edit })
 }
 
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
@@ -608,6 +608,10 @@ fn save_chunks<const N: usize>(path: &Path, items: &HashSet<[u8; N]>) -> std::io
     std::fs::write(path, bytes)
 }
 
+/// Preview text and timestamp of the newest displayable message in a thread.
+/// Receipts, reactions, deletions and edit records are skipped so bookkeeping
+/// rows cannot reorder the chat list. The store yields newest first, so an edit
+/// is seen before its target and replaces the target's text.
 async fn last_message<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
@@ -615,24 +619,29 @@ async fn last_message<S: Store>(
     let Ok(iter) = manager.store().messages(thread, ..).await else {
         return (None, 0);
     };
-    let mut last_ts = 0u64;
-    let mut last_preview: Option<String> = None;
-    for result in iter.take(50) {
+    let mut edits: HashMap<u64, DataMessage> = HashMap::new();
+    for result in iter {
         let Ok(content) = result else { continue };
-        let ts = content.timestamp();
-        if last_ts == 0 {
-            last_ts = ts; // most recent message timestamp, for sort order
+        if let Some((target_ts, edited)) = extract_edit(&content) {
+            edits.entry(target_ts).or_insert(edited);
+            continue;
         }
-        if last_preview.is_none() {
-            let names = mention_names(manager, &content).await;
-            let body = message_body(&content, |u| name_or_uuid(&names, u));
-            if !body.is_empty() {
-                last_preview = Some(body);
-                break;
+        let ts = content.timestamp();
+        let body = match edits.get(&ts) {
+            Some(edited) => {
+                let names = names_for_ranges(manager, &edited.body_ranges).await;
+                data_message_body(edited, |u| name_or_uuid(&names, u))
             }
+            None => {
+                let names = mention_names(manager, &content).await;
+                message_body(&content, |u| name_or_uuid(&names, u))
+            }
+        };
+        if !body.is_empty() {
+            return (Some(body), ts);
         }
     }
-    (last_preview, last_ts)
+    (None, 0)
 }
 
 /// The DataMessage carried by incoming content or by a sync of our own sent message.
@@ -712,8 +721,16 @@ pub async fn mention_names<S: Store>(
     manager: &Manager<S, Registered>,
     content: &Content,
 ) -> HashMap<Uuid, String> {
+    let ranges = data_message_of(content).map(|m| m.body_ranges.as_slice()).unwrap_or_default();
+    names_for_ranges(manager, ranges).await
+}
+
+async fn names_for_ranges<S: Store>(
+    manager: &Manager<S, Registered>,
+    ranges: &[BodyRange],
+) -> HashMap<Uuid, String> {
     let mut names = HashMap::new();
-    for aci in mentioned_acis(content) {
+    for (_, _, aci) in mention_ranges(ranges) {
         names.insert(aci, lookup_contact_name(manager, aci).await);
     }
     names
