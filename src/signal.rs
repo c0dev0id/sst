@@ -918,7 +918,7 @@ pub async fn load_messages_and_reactions<S: Store>(
         .context("failed to load messages")?;
 
     let mut messages: Vec<Content> = Vec::new();
-    let mut events: Vec<(u64, [u8; 16], String, bool, u64)> = Vec::new();
+    let mut events: Vec<ReactionEvent> = Vec::new();
     // target_sent_timestamp → latest edit. Store returns DESC, so the first
     // EditMessage seen for a given target is the most recent edit.
     let mut edits: HashMap<u64, DataMessage> = HashMap::new();
@@ -974,21 +974,35 @@ pub async fn load_messages_and_reactions<S: Store>(
         }
     }
 
+    Ok((messages, fold_reactions(events)))
+}
+
+/// A reaction event: (event_ts, reactor, emoji, remove, target_ts).
+type ReactionEvent = (u64, [u8; 16], String, bool, u64);
+
+/// Fold chronologically ordered reaction events into the current state. An
+/// account has one reaction per message, so a new emoji replaces that account's
+/// previous one; a removal only clears the emoji it names.
+fn fold_reactions(events: impl IntoIterator<Item = ReactionEvent>) -> ReactionMap {
     let mut reactions: ReactionMap = HashMap::new();
-    for (_, sender_bytes, emoji, remove, target_ts) in events {
-        let per_emoji = reactions.entry(target_ts).or_default().entry(emoji).or_default();
+    for (_, reactor, emoji, remove, target_ts) in events {
+        let per_target = reactions.entry(target_ts).or_default();
         if remove {
-            per_emoji.remove(&sender_bytes);
+            if let Some(reactors) = per_target.get_mut(&emoji) {
+                reactors.remove(&reactor);
+            }
         } else {
-            per_emoji.insert(sender_bytes);
+            for reactors in per_target.values_mut() {
+                reactors.remove(&reactor);
+            }
+            per_target.entry(emoji).or_default().insert(reactor);
         }
     }
     for emoji_map in reactions.values_mut() {
-        emoji_map.retain(|_, senders| !senders.is_empty());
+        emoji_map.retain(|_, reactors| !reactors.is_empty());
     }
     reactions.retain(|_, emoji_map| !emoji_map.is_empty());
-
-    Ok((messages, reactions))
+    reactions
 }
 
 /// Delete a message for everyone: sends a DataMessage.delete to the thread
@@ -1398,6 +1412,36 @@ mod tests {
         let (body, ranges) = encode_mentions(text, &roster());
         let shown = substitute_mentions(&body, &ranges, |u| name_or_uuid(&roster(), u));
         assert_eq!(shown, text);
+    }
+
+    #[test]
+    fn new_reaction_replaces_the_reactors_previous_one() {
+        let a = *alice().as_bytes();
+        let folded = fold_reactions([
+            (1, a, "👍".to_string(), false, 100),
+            (2, a, "❤️".to_string(), false, 100),
+        ]);
+        let per_target = &folded[&100];
+        assert!(!per_target.contains_key("👍"));
+        assert!(per_target["❤️"].contains(&a));
+    }
+
+    #[test]
+    fn removal_clears_only_the_named_emoji_for_that_reactor() {
+        let (a, b) = (*alice().as_bytes(), *bob().as_bytes());
+        let folded = fold_reactions([
+            (1, a, "❤️".to_string(), false, 100),
+            (2, b, "❤️".to_string(), false, 100),
+            (3, a, "👍".to_string(), true, 100),
+            (4, a, "❤️".to_string(), true, 100),
+        ]);
+        assert_eq!(folded[&100]["❤️"].len(), 1);
+        assert!(folded[&100]["❤️"].contains(&b));
+        let gone = fold_reactions([
+            (1, a, "❤️".to_string(), false, 100),
+            (2, a, "❤️".to_string(), true, 100),
+        ]);
+        assert!(gone.is_empty());
     }
 
     #[test]
