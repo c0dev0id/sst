@@ -524,6 +524,12 @@ pub async fn list_all_contacts<S: Store>(
     let mut group_entries: Vec<ThreadEntry> = Vec::new();
     for result in manager.store().groups().await? {
         let (master_key, group) = result?;
+        // A group the user has left cannot be messaged; it stays in the chat list for history.
+        if let Some(own) = own_aci
+            && !group.members.iter().any(|m| ServiceId::Aci(m.aci).raw_uuid() == own)
+        {
+            continue;
+        }
         let thread = Thread::Group(master_key);
         group_entries.push(ThreadEntry::new(thread, group.title, None, 0));
     }
@@ -1313,18 +1319,25 @@ async fn dispatch_send_body<S: Store>(
     // Without it, recipients treat each delivery as an individual DM from the sender.
     // presage's send_message_to_group does NOT inject this — it's our responsibility.
     if let Thread::Group(master_key) = thread {
-        let revision = manager.store().group(*master_key).await
-            .ok()
-            .flatten()
-            .map_or(0, |g| g.revision);
+        let group = manager.store().group(*master_key).await.ok().flatten();
+        let own_aci = manager.registration_data().service_ids.aci();
+        if let Some(group) = &group
+            && !group.members.iter().any(|m| m.aci == own_aci)
+        {
+            anyhow::bail!("you are no longer a member of this group");
+        }
         let ctx = GroupContextV2 {
             master_key: Some(master_key.to_vec()),
-            revision: Some(revision),
+            revision: Some(group.map_or(0, |g| g.revision)),
             group_change: None,
         };
+        // presage attaches our profile key to 1:1 messages only; group messages
+        // carry it too, as the official clients do.
+        let profile_key = manager.registration_data().profile_key().get_bytes().to_vec();
         match &mut body {
             ContentBody::DataMessage(dm) => {
                 dm.group_v2 = Some(ctx);
+                dm.profile_key.get_or_insert(profile_key);
             }
             ContentBody::EditMessage(edit) => {
                 if let Some(dm) = &mut edit.data_message {
