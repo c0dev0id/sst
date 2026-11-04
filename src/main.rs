@@ -307,13 +307,15 @@ async fn run<S: Store>(
         Some(Cmd::Contacts { format }) => {
             eprintln!("Syncing contacts…");
             signal::sync_contacts(&mut manager, &mut state).await?;
-            let resolved = signal::fetch_missing_profiles(&mut manager).await.unwrap_or_default();
+            if let Err(e) = signal::fetch_missing_profiles(&mut manager).await {
+                tracing::warn!("profile fetch: {e:#}");
+            }
             let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
             for entry in &contacts {
                 match &entry.thread {
                     Thread::Contact(sid) => {
                         let uuid = sid.raw_uuid();
-                        let name = resolved.get(&uuid).map_or(entry.name.as_str(), String::as_str);
+                        let name = entry.name.as_str();
                         match format {
                             Format::Text => println!("{} {}", uuid, name),
                             Format::Json => println!("{}", serde_json::json!({
@@ -360,7 +362,7 @@ async fn run<S: Store>(
             let thread = parse_thread_id(&recipient)?;
             // BTreeSet allows evicting entries older than the dedup window in O(log n).
             let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-            let mut names = signal::load_sender_names(&mut manager, &thread, None).await;
+            let mut names = signal::load_sender_names(&mut manager, &thread, None, None).await;
             let start_ts = signal::now_millis().unwrap_or(0);
 
             'reconnect: loop {
@@ -375,9 +377,7 @@ async fn run<S: Store>(
 
                 while let Some(event) = stream.next().await {
                     let Received::Content(boxed) = event else { continue };
-                    for aci in signal::mentioned_acis(&boxed) {
-                        cached_sender_name(&mut names, &manager, aci).await;
-                    }
+                    cache_mentioned_names(&mut names, &manager, &boxed).await;
                     let Some(update) = signal::extract_update(&boxed, |u| signal::name_or_uuid(&names, u)) else {
                         continue;
                     };
@@ -424,9 +424,14 @@ async fn run<S: Store>(
                 signal::upload_staged_attachments(&mut manager, &staged).await
                     .map_err(|(msg, _)| anyhow::anyhow!("{}", msg))?
             };
-            let own = signal::own_aci(&manager);
-            let names = signal::load_sender_names(&mut manager, &thread, Some(own)).await;
-            let (body, body_ranges) = signal::encode_mentions(&text, &names);
+            // Mentions need the roster; skip those lookups when there is nothing to match.
+            let (body, body_ranges) = if text.contains('@') {
+                let own = signal::own_aci(&manager);
+                let names = signal::load_sender_names(&mut manager, &thread, Some(own), None).await;
+                signal::encode_mentions(&text, &names)
+            } else {
+                (text, Vec::new())
+            };
             signal::send_to_thread(&mut manager, &thread, body, body_ranges, pointers).await?;
             Ok(())
         }
@@ -443,37 +448,41 @@ async fn cached_sender_name<S: Store>(
     if let Some(name) = cache.get(&uuid) {
         return name.clone();
     }
-    let name = signal::lookup_contact_name(manager, uuid).await;
+    let name = signal::or_uuid(signal::lookup_contact_name(manager, uuid).await, uuid);
     cache.insert(uuid, name.clone());
     name
 }
 
-/// Message text with mentioned accounts resolved to names through the shared cache.
-async fn resolved_body<S: Store>(
+/// Make sure every account mentioned in `content` has a name in the cache.
+async fn cache_mentioned_names<S: Store>(
     cache: &mut std::collections::HashMap<Uuid, String>,
     manager: &Manager<S, Registered>,
     content: &Content,
-) -> String {
+) {
     for aci in signal::mentioned_acis(content) {
         cached_sender_name(cache, manager, aci).await;
     }
-    signal::message_body(content, |u| signal::name_or_uuid(cache, u))
 }
 
-/// Print messages with names resolved like the TUI does: group roster first
-/// (profiles fetched and cached for members outside the contact store), then
-/// the contact store for anyone else.
+/// Print messages with names resolved like the TUI does, limited to the
+/// accounts that appear: the group roster (with cached profile fetches) first,
+/// then the contact store for anyone else.
 async fn print_messages<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     messages: &[Content],
     format: &Format,
 ) {
-    let mut names = signal::load_sender_names(manager, thread, None).await;
+    let wanted: std::collections::HashSet<Uuid> = messages
+        .iter()
+        .flat_map(|m| std::iter::once(m.metadata.sender.raw_uuid()).chain(signal::mentioned_acis(m)))
+        .collect();
+    let mut names = signal::load_sender_names(manager, thread, None, Some(&wanted)).await;
     for msg in messages {
         let uuid = msg.metadata.sender.raw_uuid();
         let sender_name = cached_sender_name(&mut names, manager, uuid).await;
-        let body = resolved_body(&mut names, manager, msg).await;
+        cache_mentioned_names(&mut names, manager, msg).await;
+        let body = signal::message_body(msg, |u| signal::name_or_uuid(&names, u));
         println!("{}", format_one(format, msg.timestamp(), uuid, &sender_name, &body, None));
     }
 }

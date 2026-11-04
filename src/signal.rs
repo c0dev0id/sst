@@ -476,7 +476,7 @@ pub async fn list_threads<S: Store>(
         let name = if own_aci == Some(contact.uuid) {
             "Note to Self".to_string()
         } else {
-            contact_display_name(manager, &contact).await
+            or_uuid(contact_display_name(manager, &contact).await, contact.uuid)
         };
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
@@ -492,10 +492,7 @@ pub async fn list_threads<S: Store>(
         seen.insert(uuid);
         let service_id = ServiceId::Aci(uuid.into());
         let thread = Thread::Contact(service_id);
-        let name = match manager.store().contact_by_id(&service_id).await {
-            Ok(Some(contact)) => contact_display_name(manager, &contact).await,
-            _ => uuid.to_string(),
-        };
+        let name = or_uuid(lookup_contact_name(manager, uuid).await, uuid);
         let (last_preview, last_ts) = last_message(manager, &thread).await;
         if last_ts > 0 {
             entries.push(ThreadEntry::new(thread, name, last_preview, last_ts));
@@ -531,7 +528,7 @@ pub async fn list_all_contacts<S: Store>(
         }
         let service_id = ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
-        let name = contact_display_name(manager, &contact).await;
+        let name = or_uuid(contact_display_name(manager, &contact).await, contact.uuid);
         contact_entries.push(ThreadEntry::new(thread, name, None, 0));
     }
     contact_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -542,7 +539,7 @@ pub async fn list_all_contacts<S: Store>(
         let (master_key, group) = result?;
         // A group the user has left cannot be messaged; it stays in the chat list for history.
         if let Some(own) = own_aci
-            && !group.members.iter().any(|m| ServiceId::Aci(m.aci).raw_uuid() == own)
+            && !is_member(&group, own)
         {
             continue;
         }
@@ -561,12 +558,11 @@ fn needs_profile_fetch(contact: &presage::model::contacts::Contact) -> bool {
     contact.name.is_empty() && contact.phone_number.is_none()
 }
 
-/// For contacts with no usable display name, try to fetch their Signal profile
-/// using the profile key cached in the store. Returns a map of uuid → display name
-/// for every contact that was successfully resolved.
+/// Fetch the Signal profile of every contact without a usable display name.
+/// presage caches fetched profiles, which contact_display_name reads.
 pub async fn fetch_missing_profiles<S: Store>(
     manager: &mut Manager<S, Registered>,
-) -> anyhow::Result<HashMap<Uuid, String>> {
+) -> anyhow::Result<()> {
     // Collect first: contacts() borrows &store immutably; the fetch loop below
     // needs &mut manager, which conflicts with holding the iterator.
     let nameless = {
@@ -580,51 +576,51 @@ pub async fn fetch_missing_profiles<S: Store>(
         v
     };
 
-    let mut resolved = HashMap::new();
     for contact in nameless {
         let service_id = ServiceId::Aci(contact.uuid.into());
         let Ok(Some(key)) = manager.store().profile_key(&service_id).await else {
             continue;
         };
-        match manager.retrieve_profile_by_uuid(contact.uuid, key).await {
-            Ok(profile) => {
-                if let Some(name) = &profile.name {
-                    let s = name.to_string();
-                    if !s.is_empty() {
-                        resolved.insert(contact.uuid, s);
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("profile fetch failed for {}: {e}", contact.uuid),
+        if let Err(e) = manager.retrieve_profile_by_uuid(contact.uuid, key).await {
+            tracing::warn!("profile fetch failed for {}: {e}", contact.uuid);
         }
     }
-    Ok(resolved)
+    Ok(())
 }
 
 /// A contact's name in Signal's order of preference: the address-book name,
-/// then the name on their profile (as cached by presage), then phone number,
-/// then UUID.
+/// then the name on their profile (as cached by presage), then phone number.
 async fn contact_display_name<S: Store>(
     manager: &Manager<S, Registered>,
     contact: &presage::model::contacts::Contact,
-) -> String {
+) -> Option<String> {
     if !contact.name.is_empty() {
-        return contact.name.clone();
+        return Some(contact.name.clone());
     }
     if let Some(name) = cached_profile_name(manager, contact.uuid).await {
-        return name;
+        return Some(name);
     }
-    contact
-        .phone_number
-        .as_ref()
-        .map_or_else(|| contact.uuid.to_string(), ToString::to_string)
+    contact.phone_number.as_ref().map(ToString::to_string)
 }
 
 async fn cached_profile_name<S: Store>(manager: &Manager<S, Registered>, uuid: Uuid) -> Option<String> {
     let service_id = ServiceId::Aci(uuid.into());
     let key = manager.store().profile_key(&service_id).await.ok().flatten()?;
     let profile = manager.store().profile(uuid, key).await.ok().flatten()?;
-    profile.name.map(|n| n.to_string()).filter(|n| !n.is_empty())
+    profile_display_name(profile.name)
+}
+
+/// A profile's name as display text, if it has one.
+fn profile_display_name<N: ToString>(name: Option<N>) -> Option<String> {
+    name.map(|n| n.to_string()).filter(|s| !s.is_empty())
+}
+
+pub fn or_uuid(name: Option<String>, uuid: Uuid) -> String {
+    name.unwrap_or_else(|| uuid.to_string())
+}
+
+fn is_member(group: &presage::model::groups::Group, aci: Uuid) -> bool {
+    group.members.iter().any(|m| ServiceId::Aci(m.aci).raw_uuid() == aci)
 }
 
 // On-disk format for both known contacts (16-byte UUIDs) and known group
@@ -844,15 +840,18 @@ async fn names_for_ranges<S: Store>(
 ) -> HashMap<Uuid, String> {
     let mut names = HashMap::new();
     for (_, _, aci) in mention_ranges(ranges) {
-        names.insert(aci, lookup_contact_name(manager, aci).await);
+        if let Some(name) = lookup_contact_name(manager, aci).await {
+            names.insert(aci, name);
+        }
     }
     names
 }
 
-/// Display name of a thread: the contact's name or the group title.
+/// Display name of a thread: the contact's name, Note to Self, or the group title.
 pub async fn thread_title<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> String {
     match thread {
-        Thread::Contact(sid) => lookup_contact_name(manager, sid.raw_uuid()).await,
+        Thread::Contact(sid) if sid.raw_uuid() == own_aci(manager) => "Note to Self".to_string(),
+        Thread::Contact(sid) => or_uuid(lookup_contact_name(manager, sid.raw_uuid()).await, sid.raw_uuid()),
         Thread::Group(key) => match manager.store().group(*key).await {
             Ok(Some(group)) => group.title,
             _ => "Unknown group".to_string(),
@@ -952,26 +951,26 @@ pub fn quote_ref(content: &Content) -> QuoteRef {
     }
 }
 
-/// Look up a contact's display name by UUID; falls back to the UUID string.
+/// A contact's display name, if the contact store knows them.
 pub async fn lookup_contact_name<S: Store>(
     manager: &Manager<S, Registered>,
     uuid: Uuid,
-) -> String {
+) -> Option<String> {
     let service_id = ServiceId::Aci(uuid.into());
-    match manager.store().contact_by_id(&service_id).await {
-        Ok(Some(contact)) => contact_display_name(manager, &contact).await,
-        _ => uuid.to_string(),
-    }
+    let contact = manager.store().contact_by_id(&service_id).await.ok().flatten()?;
+    contact_display_name(manager, &contact).await
 }
 
-/// Resolves display names for all participants in a thread (excluding self).
-/// Returns a UUID → name map used for sender labels and @mention completion.
-/// For group members not in the contact store, attempts a profile fetch using
-/// the profile key stored in the group roster.
+/// Names of a thread's participants other than `own_aci`, keyed by ACI, for
+/// sender labels, mention rendering and @completion. Group members missing from
+/// the contact store get a profile fetch with the roster's profile key (presage
+/// caches the result); `wanted` restricts a group to the given members.
+/// Members that cannot be resolved are left out, so callers fall back to the UUID.
 pub async fn load_sender_names<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     own_aci: Option<Uuid>,
+    wanted: Option<&HashSet<Uuid>>,
 ) -> HashMap<Uuid, String> {
     let mut map: HashMap<Uuid, String> = HashMap::new();
     match thread {
@@ -980,36 +979,31 @@ pub async fn load_sender_names<S: Store>(
                 return map;
             };
             for member in group.members {
-                let uuid = ServiceId::Aci(member.aci)
-                    .raw_uuid();
-                if own_aci == Some(uuid) {
+                let uuid = ServiceId::Aci(member.aci).raw_uuid();
+                if own_aci == Some(uuid) || wanted.is_some_and(|w| !w.contains(&uuid)) {
                     continue;
                 }
-                let name = lookup_contact_name(manager, uuid).await;
-                if name != uuid.to_string() {
+                let name = match lookup_contact_name(manager, uuid).await {
+                    Some(name) => Some(name),
+                    None => match manager.retrieve_profile_by_uuid(uuid, member.profile_key).await {
+                        Ok(profile) => profile_display_name(profile.name),
+                        Err(e) => {
+                            tracing::warn!("profile fetch failed for {uuid}: {e}");
+                            None
+                        }
+                    },
+                };
+                if let Some(name) = name {
                     map.insert(uuid, name);
-                    continue;
-                }
-                // Not in contact store — try profile fetch using the roster key.
-                match manager.retrieve_profile_by_uuid(uuid, member.profile_key).await {
-                    Ok(profile) => {
-                        let resolved = profile.name
-                            .map(|n| n.to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| uuid.to_string());
-                        map.insert(uuid, resolved);
-                    }
-                    Err(e) => {
-                        tracing::warn!("profile fetch failed for {uuid}: {e}");
-                        map.insert(uuid, uuid.to_string());
-                    }
                 }
             }
         }
         Thread::Contact(service_id) => {
             let uuid = service_id.raw_uuid();
-            if own_aci != Some(uuid) {
-                map.insert(uuid, lookup_contact_name(manager, uuid).await);
+            if own_aci != Some(uuid)
+                && let Some(name) = lookup_contact_name(manager, uuid).await
+            {
+                map.insert(uuid, name);
             }
         }
     }
@@ -1290,8 +1284,12 @@ pub fn message_quote(content: &Content, name_of: impl Fn(Uuid) -> String) -> Opt
     Some((author, shown.render(name_of)))
 }
 
+pub fn own_service_id<S: Store>(manager: &Manager<S, Registered>) -> ServiceId {
+    ServiceId::Aci(manager.registration_data().service_ids.aci())
+}
+
 pub fn own_aci<S: Store>(manager: &Manager<S, Registered>) -> Uuid {
-    ServiceId::Aci(manager.registration_data().service_ids.aci()).raw_uuid()
+    own_service_id(manager).raw_uuid()
 }
 
 /// Timestamp of the oldest message we sent in `messages`; receipts for our
@@ -1388,9 +1386,8 @@ pub async fn send_read_receipts<S: Store>(
             .collect(),
         ..Default::default()
     };
-    let own = ServiceId::Aci(manager.registration_data().service_ids.aci());
     manager
-        .send_message(own, sync, now_millis()?)
+        .send_message(own_service_id(manager), sync, now_millis()?)
         .await
         .context("failed to sync read state to own devices")?;
     Ok(())
@@ -1425,9 +1422,8 @@ async fn dispatch_send_body<S: Store>(
     // presage's send_message_to_group does NOT inject this — it's our responsibility.
     if let Thread::Group(master_key) = thread {
         let group = manager.store().group(*master_key).await.ok().flatten();
-        let own_aci = manager.registration_data().service_ids.aci();
         if let Some(group) = &group
-            && !group.members.iter().any(|m| m.aci == own_aci)
+            && !is_member(group, own_aci(manager))
         {
             anyhow::bail!("you are no longer a member of this group");
         }

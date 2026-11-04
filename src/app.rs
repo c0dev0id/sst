@@ -81,7 +81,7 @@ impl ChatState {
         if own_aci == Some(uuid) {
             return "You".to_string();
         }
-        self.sender_names.get(&uuid).cloned().unwrap_or_else(|| uuid.to_string())
+        signal::name_or_uuid(&self.sender_names, uuid)
     }
 }
 
@@ -943,7 +943,7 @@ async fn execute_cmd<S: Store>(
             let (delivered, read) = signal::load_receipt_state(manager, &thread, oldest_own)
                 .await
                 .unwrap_or_default();
-            let sender_names = signal::load_sender_names(manager, &thread, own_aci).await;
+            let sender_names = signal::load_sender_names(manager, &thread, own_aci, None).await;
             let expire_timer = signal::expire_timer(manager, &thread).await;
 
             let to_ack: Vec<(Uuid, u64)> = messages
