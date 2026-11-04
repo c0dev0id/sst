@@ -277,10 +277,10 @@ async fn run<S: Store>(
                     Format::Json => {
                         let id = thread_id_string(&entry.thread);
                         println!("{}", serde_json::json!({
-                            "id":      id,
-                            "name":    entry.name,
-                            "preview": entry.last_preview,
-                            "last_ts": entry.last_ts,
+                            "id":        id,
+                            "name":      entry.name,
+                            "preview":   entry.last_preview,
+                            "timestamp": iso_timestamp(entry.last_ts),
                         }));
                     }
                 }
@@ -355,20 +355,22 @@ async fn run<S: Store>(
 
                 while let Some(event) = stream.next().await {
                     let Received::Content(boxed) = event else { continue };
-                    let ts = boxed.timestamp();
-                    if ts < start_ts { continue; }
-                    if Thread::try_from(boxed.as_ref()).ok().as_ref() != Some(&thread) { continue; }
-                    let body = resolved_body(&mut names, &manager, &boxed).await;
-                    if body.is_empty() { continue; }
+                    for aci in signal::mentioned_acis(&boxed) {
+                        cached_sender_name(&mut names, &manager, aci).await;
+                    }
+                    let Some(update) = signal::extract_update(&boxed, |u| signal::name_or_uuid(&names, u)) else {
+                        continue;
+                    };
+                    if update.thread != thread || update.ts < start_ts { continue; }
                     // Evict timestamps older than 60 s to keep the dedup set bounded.
-                    let horizon = ts.saturating_sub(60_000);
+                    let horizon = update.ts.saturating_sub(60_000);
                     while seen.first().is_some_and(|&t| t < horizon) {
                         seen.pop_first();
                     }
-                    if !seen.insert(ts) { continue; }
+                    if !seen.insert(update.ts) { continue; }
                     let sender_uuid = boxed.metadata.sender.raw_uuid();
                     let sender_name = cached_sender_name(&mut names, &manager, sender_uuid).await;
-                    let line = format_one(&format, ts, sender_uuid, &sender_name, &body);
+                    let line = format_one(&format, update.ts, sender_uuid, &sender_name, &update.preview, update.edit_of);
                     println!("{}", line);
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
@@ -402,7 +404,10 @@ async fn run<S: Store>(
                 signal::upload_staged_attachments(&mut manager, &staged).await
                     .map_err(|(msg, _)| anyhow::anyhow!("{}", msg))?
             };
-            signal::send_to_thread(&mut manager, &thread, text, Vec::new(), pointers).await?;
+            let own = signal::own_aci(&manager);
+            let names = signal::load_sender_names(&mut manager, &thread, Some(own)).await;
+            let (body, body_ranges) = signal::encode_mentions(&text, &names);
+            signal::send_to_thread(&mut manager, &thread, body, body_ranges, pointers).await?;
             Ok(())
         }
     }
@@ -449,24 +454,38 @@ async fn print_messages<S: Store>(
         let uuid = msg.metadata.sender.raw_uuid();
         let sender_name = cached_sender_name(&mut names, manager, uuid).await;
         let body = resolved_body(&mut names, manager, msg).await;
-        println!("{}", format_one(format, msg.timestamp(), uuid, &sender_name, &body));
+        println!("{}", format_one(format, msg.timestamp(), uuid, &sender_name, &body, None));
     }
 }
 
-fn format_one(format: &Format, ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str) -> String {
+fn iso_timestamp(ts_ms: u64) -> String {
+    signal::ts_to_datetime(ts_ms).map_or_else(|| ts_ms.to_string(), |dt| dt.to_rfc3339())
+}
+
+fn format_one(
+    format: &Format,
+    ts_ms: u64,
+    sender_uuid: Uuid,
+    sender_name: &str,
+    body: &str,
+    edit_of: Option<u64>,
+) -> String {
     match format {
         Format::Text => {
-            format!("[{}] {}: {}", signal::fmt_ts_long(ts_ms), sender_name, body)
+            let edited = if edit_of.is_some() { " (edited)" } else { "" };
+            format!("[{}] {}: {}{}", signal::fmt_ts_long(ts_ms), sender_name, body, edited)
         }
         Format::Json => {
-            let ts = signal::ts_to_datetime(ts_ms)
-                .map_or_else(|| ts_ms.to_string(), |dt| dt.to_rfc3339());
-            serde_json::json!({
-                "timestamp":   ts,
+            let mut record = serde_json::json!({
+                "timestamp":   iso_timestamp(ts_ms),
                 "sender_uuid": sender_uuid.to_string(),
                 "sender_name": sender_name,
                 "body":        body,
-            }).to_string()
+            });
+            if let Some(target) = edit_of {
+                record["edit_of"] = serde_json::Value::String(iso_timestamp(target));
+            }
+            record.to_string()
         }
     }
 }

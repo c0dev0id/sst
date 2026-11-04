@@ -620,11 +620,11 @@ impl App {
     pub fn apply_update(&mut self, update: MessageUpdate, from_self: bool) -> Option<MessageUpdate> {
         let mark_unread = self.marks_unread(&update.thread, from_self);
         let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) else {
-            return (!update.is_edit).then_some(update);
+            return update.edit_of.is_none().then_some(update);
         };
-        if update.is_edit {
+        if let Some(target_ts) = update.edit_of {
             // An edit changes text only; it shows in the list if it hit the newest message.
-            if update.ts == entry.last_ts {
+            if target_ts == entry.last_ts {
                 entry.last_preview = Some(update.preview);
             }
             return None;

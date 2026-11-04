@@ -73,8 +73,8 @@ impl ThreadEntry {
 pub struct MessageUpdate {
     pub thread: Thread,
     pub preview: String,
-    pub ts: u64,      // the message's own timestamp; for an edit, the edited message's
-    pub is_edit: bool,
+    pub ts: u64,              // when this message, or this edit, was sent
+    pub edit_of: Option<u64>, // for an edit, the timestamp of the message it replaces
 }
 
 pub struct SyncState {
@@ -444,14 +444,17 @@ pub fn affects_thread(received: &Received, thread: &Thread) -> bool {
 /// events yield None so they cannot clear a preview or reorder the list.
 pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Option<MessageUpdate> {
     let thread = Thread::try_from(content).ok()?;
-    let (preview, ts, is_edit) = match extract_edit(content) {
-        Some((target_ts, edited)) => (data_message_body(&edited, name_of), target_ts, true),
-        None => (message_body(content, name_of), content.timestamp(), false),
+    let (preview, ts, edit_of) = match extract_edit(content) {
+        Some((target_ts, edited)) => {
+            let sent_ts = edited.timestamp.unwrap_or(target_ts);
+            (data_message_body(&edited, name_of), sent_ts, Some(target_ts))
+        }
+        None => (message_body(content, name_of), content.timestamp(), None),
     };
     if preview.is_empty() {
         return None;
     }
-    Some(MessageUpdate { thread, preview, ts, is_edit })
+    Some(MessageUpdate { thread, preview, ts, edit_of })
 }
 
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
@@ -785,7 +788,7 @@ fn substitute_mentions(body: &str, ranges: &[BodyRange], name_of: impl Fn(Uuid) 
 
 /// Accounts mentioned in the message body.
 pub fn mentioned_acis(content: &Content) -> Vec<Uuid> {
-    data_message_of(content)
+    text_message_of(content)
         .map(|msg| mention_ranges(&msg.body_ranges).map(|(_, _, aci)| aci).collect())
         .unwrap_or_default()
 }
@@ -795,7 +798,7 @@ pub async fn mention_names<S: Store>(
     manager: &Manager<S, Registered>,
     content: &Content,
 ) -> HashMap<Uuid, String> {
-    let ranges = data_message_of(content).map(|m| m.body_ranges.as_slice()).unwrap_or_default();
+    let ranges = text_message_of(content).map(|m| m.body_ranges.as_slice()).unwrap_or_default();
     names_for_ranges(manager, ranges).await
 }
 
@@ -977,18 +980,28 @@ pub async fn load_sender_names<S: Store>(
     map
 }
 
-/// Extract (target_sent_timestamp, edited DataMessage) from an EditMessage or a
-/// SyncMessage wrapping an edit sent by us on another device.
-fn extract_edit(content: &Content) -> Option<(u64, DataMessage)> {
-    let edit = match &content.body {
-        ContentBody::EditMessage(edit) => edit,
+/// The edit carried by incoming content or by a sync of our own edit.
+fn edit_of(content: &Content) -> Option<&EditMessage> {
+    match &content.body {
+        ContentBody::EditMessage(edit) => Some(edit),
         ContentBody::SynchronizeMessage(SyncMessage {
             sent: Some(Sent { edit_message: Some(edit), .. }),
             ..
-        }) => edit,
-        _ => return None,
-    };
+        }) => Some(edit),
+        _ => None,
+    }
+}
+
+/// (target_sent_timestamp, replacement message) of an edit.
+fn extract_edit(content: &Content) -> Option<(u64, DataMessage)> {
+    let edit = edit_of(content)?;
     Some((edit.target_sent_timestamp?, edit.data_message.clone()?))
+}
+
+/// The DataMessage whose text a content item carries: the message itself, or
+/// the replacement text of an edit.
+fn text_message_of(content: &Content) -> Option<&DataMessage> {
+    data_message_of(content).or_else(|| edit_of(content)?.data_message.as_ref())
 }
 
 /// Replace the text of a message with its edited version, mentions included.

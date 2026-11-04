@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- `sst chats --format=json` emits `timestamp` in RFC 3339 like `print` does, replacing the epoch-millisecond `last_ts` field.
 - `sst link` now prints "Linking successful. Device provisioned." on success, "Linking timed out…" after 5 minutes of no QR scan, and clearly labels underlying failures. Previously the QR appeared and the command exited silently on both success and timeout, giving no feedback either way.
 - Signal auth failures (HTTP 403 on the WebSocket upgrade — typical after the device is unlinked from the primary) now surface as: "Signal rejected this device. Run `sst link` to re-provision." with the underlying error printed below. Previously the raw "libsignal-service error: Websocket error: websocket upgrade failed" was shown, which was not actionable.
 - CLI redesigned from ad-hoc flags to a consistent subcommand interface: `sst link`, `sst chats`, `sst contacts`, `sst print <uuid>`, `sst print-last [-n N] <uuid>`, `sst watch <uuid>`, `sst send <uuid> [text] [--attach <path>]…`. Running `sst` with no subcommand opens the TUI as before. All subcommands accept `--format=text|json` for machine-readable output. A global `--db <path>` flag overrides the default store location. `sst help` and `sst help <subcommand>` print usage information.
@@ -35,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
 ### Added
+- `sst send` turns `@Name` into a real mention like the TUI. `sst watch` prints edits as they arrive, marked `(edited)` in text output and with an `edit_of` field in JSON.
 - The chat header shows the thread's disappearing-message timer when one is set.
 - Mentions: an `@Name` in the message (Tab-completed or typed) is sent as a Signal mention, so the member's client highlights it and notifies them. Applies to new messages, replies and edits. Replies quote the original text with its mentions intact.
 - Startup progress output: launching the TUI now prints "Connecting to Signal…", a live message-sync counter, a one-time "Fetching group metadata…" notice when group data is missing, and "Loading chats…" before the interface appears. Previously the terminal showed nothing while the backlog drained, so a slow first sync looked like a hang. Progress is written to stderr and only for the interactive TUI; the scriptable subcommands stay silent.
