@@ -73,9 +73,18 @@ impl ThreadEntry {
 
 pub struct MessageUpdate {
     pub thread: Thread,
+    pub sender: Uuid,
     pub preview: String,
     pub ts: u64,              // when this message, or this edit, was sent
     pub edit_of: Option<u64>, // for an edit, the timestamp of the message it replaces
+}
+
+pub(crate) fn sort_recent_first(entries: &mut [ThreadEntry]) {
+    entries.sort_by_key(|e| std::cmp::Reverse(e.last_ts));
+}
+
+pub fn is_own(content: &Content, own_aci: Option<Uuid>) -> bool {
+    own_aci == Some(content.metadata.sender.raw_uuid())
 }
 
 pub struct SyncState {
@@ -428,16 +437,24 @@ pub async fn connect<S: Store>(
     Ok(stream)
 }
 
-/// Whether a live event can change what an open chat shows: a message in that
-/// thread, or any receipt (group members' receipts arrive in their 1:1
-/// threads). Typing indicators and queue markers never do.
-pub fn affects_thread(received: &Received, thread: &Thread) -> bool {
-    let Received::Content(content) = received else { return false };
-    match &content.body {
-        ContentBody::TypingMessage(_) => false,
-        ContentBody::ReceiptMessage(_) => true,
-        _ => Thread::try_from(content.as_ref()).ok().as_ref() == Some(thread),
+/// A receipt arriving live. Its timestamps name our messages wherever they were
+/// sent, so it can be folded into the open chat without touching the store.
+pub fn live_receipt(received: &Received) -> Option<&ReceiptMessage> {
+    match received {
+        Received::Content(content) => match &content.body {
+            ContentBody::ReceiptMessage(receipt) => Some(receipt),
+            _ => None,
+        },
+        _ => None,
     }
+}
+
+/// Whether a live event is a message in `thread` (text, reaction, edit or
+/// delete), as opposed to a receipt, typing indicator or queue marker.
+pub fn is_message_in(received: &Received, thread: &Thread) -> bool {
+    let Received::Content(content) = received else { return false };
+    !matches!(content.body, ContentBody::TypingMessage(_) | ContentBody::ReceiptMessage(_))
+        && Thread::try_from(content.as_ref()).ok().as_ref() == Some(thread)
 }
 
 /// The chat-list effect of a live event: the thread's new preview and the
@@ -455,7 +472,8 @@ pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Op
     if preview.is_empty() {
         return None;
     }
-    Some(MessageUpdate { thread, preview, ts, edit_of })
+    let sender = content.metadata.sender.raw_uuid();
+    Some(MessageUpdate { thread, sender, preview, ts, edit_of })
 }
 
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
@@ -508,7 +526,7 @@ pub async fn list_threads<S: Store>(
         }
     }
 
-    entries.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    sort_recent_first(&mut entries);
     Ok(entries)
 }
 
@@ -1292,28 +1310,32 @@ pub fn own_aci<S: Store>(manager: &Manager<S, Registered>) -> Uuid {
     own_service_id(manager).raw_uuid()
 }
 
-/// Timestamp of the oldest message we sent in `messages`; receipts for our
-/// messages cannot predate it.
-pub fn oldest_own_message_ts(messages: &[Content], own_aci: Option<Uuid>) -> Option<u64> {
-    messages
-        .iter()
-        .filter(|m| own_aci == Some(m.metadata.sender.raw_uuid()))
-        .map(|m| m.timestamp())
-        .min()
+/// Add a receipt's timestamps to the delivery state; read implies delivered.
+pub(crate) fn fold_receipt(receipt: &ReceiptMessage, delivered: &mut HashSet<u64>, read: &mut HashSet<u64>) {
+    match receipt.r#type.and_then(|t| receipt_message::Type::try_from(t).ok()) {
+        Some(receipt_message::Type::Delivery) => delivered.extend(receipt.timestamp.iter().copied()),
+        Some(receipt_message::Type::Read) => {
+            read.extend(receipt.timestamp.iter().copied());
+            delivered.extend(receipt.timestamp.iter().copied());
+        }
+        _ => {}
+    }
 }
 
-/// Delivery and read receipts for our messages in a thread, as
-/// (delivered_timestamps, read_timestamps); read implies delivered. Group
-/// members send receipts in their own 1:1 thread, so a group is resolved by
-/// scanning every member's thread. Scanning starts at `oldest_own_ts`.
+/// Delivery and read receipts for our messages among `messages`, which belong
+/// to `thread`, as (delivered_timestamps, read_timestamps). Group members send
+/// receipts in their own 1:1 thread, so a group is resolved by scanning every
+/// member's thread, from our oldest message onward.
 pub async fn load_receipt_state<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
-    oldest_own_ts: Option<u64>,
+    messages: &[Content],
 ) -> anyhow::Result<(HashSet<u64>, HashSet<u64>)> {
+    let own = own_aci(manager);
     let mut delivered: HashSet<u64> = HashSet::new();
     let mut read: HashSet<u64> = HashSet::new();
-    let Some(from) = oldest_own_ts else {
+    let oldest_own = messages.iter().filter(|m| is_own(m, Some(own))).map(|m| m.timestamp()).min();
+    let Some(from) = oldest_own else {
         return Ok((delivered, read));
     };
     let sources: Vec<Thread> = match thread {
@@ -1323,7 +1345,6 @@ pub async fn load_receipt_state<S: Store>(
             _ => Vec::new(),
         },
     };
-    let own = own_aci(manager);
     for source in &sources {
         let iter = manager
             .store()
@@ -1333,19 +1354,11 @@ pub async fn load_receipt_state<S: Store>(
         for result in iter {
             let Ok(content) = result else { continue };
             // Receipts we sent are stored in the same thread; they say nothing about our messages.
-            if content.metadata.sender.raw_uuid() == own {
+            if is_own(&content, Some(own)) {
                 continue;
             }
-            let ContentBody::ReceiptMessage(receipt) = &content.body else { continue };
-            match receipt.r#type.and_then(|t| receipt_message::Type::try_from(t).ok()) {
-                Some(receipt_message::Type::Delivery) => {
-                    delivered.extend(receipt.timestamp.iter().copied());
-                }
-                Some(receipt_message::Type::Read) => {
-                    read.extend(receipt.timestamp.iter().copied());
-                    delivered.extend(receipt.timestamp.iter().copied());
-                }
-                _ => {}
+            if let ContentBody::ReceiptMessage(receipt) = &content.body {
+                fold_receipt(receipt, &mut delivered, &mut read);
             }
         }
     }

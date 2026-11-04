@@ -10,7 +10,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::Content;
 use presage::libsignal_service::prelude::Uuid;
-use presage::libsignal_service::proto::AttachmentPointer;
+use presage::libsignal_service::proto::{AttachmentPointer, ReceiptMessage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
@@ -29,13 +29,20 @@ pub enum Mode {
     Command(String),
 }
 
-pub struct LoadedChat {
+/// What the store holds for a thread, as the chat window shows it.
+pub struct ChatView {
     pub messages: Vec<Content>,
-    pub expire_timer: Option<u32>,
+    pub reactions: ReactionMap,
     pub delivered: HashSet<u64>,
     pub read: HashSet<u64>,
-    pub reactions: ReactionMap,
-    pub sender_names: HashMap<Uuid, String>,
+    pub expire_timer: Option<u32>,
+}
+
+async fn load_chat_view<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> anyhow::Result<ChatView> {
+    let (messages, reactions) = signal::load_messages_and_reactions(manager, thread).await?;
+    let (delivered, read) = signal::load_receipt_state(manager, thread, &messages).await.unwrap_or_default();
+    let expire_timer = signal::expire_timer(manager, thread).await;
+    Ok(ChatView { messages, reactions, delivered, read, expire_timer })
 }
 
 pub struct ChatState {
@@ -76,6 +83,20 @@ impl ChatState {
         self.reply_to = index_of(reply_ts);
     }
 
+    /// Replace everything the store provides, keeping cursor and draft state.
+    pub fn apply(&mut self, view: ChatView) {
+        self.set_messages(view.messages);
+        self.reactions = view.reactions;
+        self.delivered = view.delivered;
+        self.read = view.read;
+        self.expire_timer = view.expire_timer;
+    }
+
+    /// Fold a receipt that arrived live into the delivery state.
+    pub fn apply_receipt(&mut self, receipt: &ReceiptMessage) {
+        signal::fold_receipt(receipt, &mut self.delivered, &mut self.read);
+    }
+
     /// Name shown for a thread participant; the local account is "You".
     pub fn display_name(&self, uuid: Uuid, own_aci: Option<Uuid>) -> String {
         if own_aci == Some(uuid) {
@@ -98,6 +119,7 @@ pub struct App {
     pub threads: Vec<ThreadEntry>,
     pub list_state: ListState,
     pub status: Option<String>, // message shown on the list/contact status bar until the next key
+    pub acked: HashSet<u64>,    // messages read-receipted this session
     pub quit: bool,
     pub view: View,
     pub chat: Option<ChatState>,
@@ -118,6 +140,7 @@ impl App {
             threads,
             list_state,
             status: None,
+            acked: HashSet::new(),
             quit: false,
             view: View::ChatList,
             chat: None,
@@ -129,26 +152,26 @@ impl App {
         }
     }
 
-    pub fn open_chat(&mut self, thread: Thread, thread_name: String, data: LoadedChat) {
+    pub fn open_chat(&mut self, thread: Thread, thread_name: String, view: ChatView, sender_names: HashMap<Uuid, String>) {
         self.chat = Some(ChatState {
             thread,
             thread_name,
-            expire_timer: data.expire_timer,
-            messages: data.messages,
+            expire_timer: view.expire_timer,
+            messages: view.messages,
             scroll: 0,
             viewport_height: 0,
             viewport_top_msg: 0,
             input: String::new(),
             cursor: 0,
             selected_message: None,
-            delivered: data.delivered,
-            read: data.read,
+            delivered: view.delivered,
+            read: view.read,
             status: None,
-            reactions: data.reactions,
+            reactions: view.reactions,
             mode: Mode::Normal,
             reply_to: None,
             editing: None,
-            sender_names: data.sender_names,
+            sender_names,
             pending_d: false,
             staged_attachments: Vec::new(),
             selected_attachment: None,
@@ -343,12 +366,7 @@ impl App {
                             if chat.pending_d {
                                 chat.pending_d = false;
                                 chat.staged_attachments.remove(att_idx);
-                                let new_len = chat.staged_attachments.len();
-                                chat.selected_attachment = if new_len == 0 {
-                                    None
-                                } else {
-                                    Some(att_idx.min(new_len - 1))
-                                };
+                                chat.selected_attachment = clamp_selection(att_idx, chat.staged_attachments.len());
                             } else {
                                 chat.pending_d = true;
                                 chat.status = Some("d again to remove attachment".to_string());
@@ -611,15 +629,19 @@ impl App {
 
     /// Whether a live message should mark its thread unread: not when the user
     /// sent it from another device, and not when they are looking at that chat.
-    fn marks_unread(&self, thread: &Thread, from_self: bool) -> bool {
-        !from_self && !self.chat.as_ref().is_some_and(|c| &c.thread == thread)
+    fn marks_unread(&self, update: &MessageUpdate) -> bool {
+        self.own_aci != Some(update.sender) && !self.chat.as_ref().is_some_and(|c| c.thread == update.thread)
+    }
+
+    fn entry_mut(&mut self, thread: &Thread) -> Option<&mut ThreadEntry> {
+        self.threads.iter_mut().find(|e| &e.thread == thread)
     }
 
     /// Fold a live message into its thread entry. Returns the update when no
     /// entry exists for its thread, so the caller can add one with a name.
-    pub fn apply_update(&mut self, update: MessageUpdate, from_self: bool) -> Option<MessageUpdate> {
-        let mark_unread = self.marks_unread(&update.thread, from_self);
-        let Some(entry) = self.threads.iter_mut().find(|e| e.thread == update.thread) else {
+    fn apply_update(&mut self, update: MessageUpdate) -> Option<MessageUpdate> {
+        let mark_unread = self.marks_unread(&update);
+        let Some(entry) = self.entry_mut(&update.thread) else {
             return update.edit_of.is_none().then_some(update);
         };
         if let Some(target_ts) = update.edit_of {
@@ -640,27 +662,28 @@ impl App {
                 entry.unread = true;
             }
         }
-        self.threads.sort_by_key(|e| std::cmp::Reverse(e.last_ts));
+        signal::sort_recent_first(&mut self.threads);
         None
     }
 
-    pub fn add_thread(&mut self, update: MessageUpdate, name: String, from_self: bool) {
-        let unread = self.marks_unread(&update.thread, from_self);
-        self.threads.push(ThreadEntry {
-            thread: update.thread,
-            name,
-            last_preview: Some(update.preview),
-            last_ts: update.ts,
-            unread,
-        });
-        self.threads.sort_by_key(|e| std::cmp::Reverse(e.last_ts));
+    fn add_thread(&mut self, update: MessageUpdate, name: String) {
+        let unread = self.marks_unread(&update);
+        let mut entry = ThreadEntry::new(update.thread, name, Some(update.preview), update.ts);
+        entry.unread = unread;
+        self.threads.push(entry);
+        signal::sort_recent_first(&mut self.threads);
     }
 
-    pub fn mark_read(&mut self, thread: &Thread) {
-        if let Some(entry) = self.threads.iter_mut().find(|e| &e.thread == thread) {
+    fn mark_read(&mut self, thread: &Thread) {
+        if let Some(entry) = self.entry_mut(thread) {
             entry.unread = false;
         }
     }
+}
+
+/// Selection index after a list shrank: the same position, or the new last item.
+fn clamp_selection(sel: usize, len: usize) -> Option<usize> {
+    (len > 0).then(|| sel.min(len - 1))
 }
 
 // ── Colon command registry ────────────────────────────────────────────────────
@@ -903,6 +926,56 @@ async fn next_or_pending(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>
     }
 }
 
+/// Fold a live Signal event into the thread list and the open chat.
+async fn on_live_event<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>, received: &Received) {
+    if let Received::Content(content) = received {
+        fold_live_message(app, manager, content).await;
+    }
+    let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone()) else { return };
+    if let Some(receipt) = signal::live_receipt(received) {
+        if let Some(chat) = &mut app.chat {
+            chat.apply_receipt(receipt);
+        }
+    } else if signal::is_message_in(received, &thread) {
+        match load_chat_view(manager, &thread).await {
+            Ok(view) => {
+                if let Some(chat) = &mut app.chat {
+                    chat.apply(view);
+                }
+                ack_unseen(app, manager).await;
+            }
+            Err(e) => tracing::warn!("reload chat: {e:#}"),
+        }
+    }
+}
+
+/// Update the thread list for a live message, adding an entry for a thread not yet listed.
+async fn fold_live_message<S: Store>(app: &mut App, manager: &Manager<S, Registered>, content: &Content) {
+    let names = signal::mention_names(manager, content).await;
+    let Some(update) = signal::extract_update(content, |u| signal::name_or_uuid(&names, u)) else { return };
+    if let Some(update) = app.apply_update(update) {
+        let name = signal::thread_title(manager, &update.thread).await;
+        app.add_thread(update, name);
+    }
+}
+
+/// Send read receipts for the open chat's messages from others that have not
+/// been acknowledged this session, and remember them.
+async fn ack_unseen<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) {
+    let Some(chat) = &app.chat else { return };
+    let unseen: Vec<(Uuid, u64)> = chat
+        .messages
+        .iter()
+        .filter(|m| !signal::is_own(m, app.own_aci) && !app.acked.contains(&m.timestamp()))
+        .map(|m| (m.metadata.sender.raw_uuid(), m.timestamp()))
+        .collect();
+    let stamps: Vec<u64> = unseen.iter().map(|(_, ts)| *ts).collect();
+    match signal::send_read_receipts(manager, unseen).await {
+        Ok(()) => app.acked.extend(stamps),
+        Err(e) => tracing::warn!("send_read_receipts: {e:#}"),
+    }
+}
+
 // Reload messages + reactions from the store after a send and apply them to the open chat.
 // presage commits sent messages to the local store before returning from the send call,
 // so this is immediately consistent without waiting for the SyncMessage echo.
@@ -937,34 +1010,11 @@ async fn execute_cmd<S: Store>(
 ) -> anyhow::Result<()> {
     match cmd {
         AppCmd::OpenChat { thread, name } => {
-            let own_aci = app.own_aci;
-            let (messages, reactions) = signal::load_messages_and_reactions(manager, &thread).await?;
-            let oldest_own = signal::oldest_own_message_ts(&messages, own_aci);
-            let (delivered, read) = signal::load_receipt_state(manager, &thread, oldest_own)
-                .await
-                .unwrap_or_default();
-            let sender_names = signal::load_sender_names(manager, &thread, own_aci, None).await;
-            let expire_timer = signal::expire_timer(manager, &thread).await;
-
-            let to_ack: Vec<(Uuid, u64)> = messages
-                .iter()
-                .filter(|m| own_aci.is_none_or(|a| a != m.metadata.sender.raw_uuid()))
-                .map(|m| (m.metadata.sender.raw_uuid(), m.timestamp()))
-                .collect();
-
+            let view = load_chat_view(manager, &thread).await?;
+            let sender_names = signal::load_sender_names(manager, &thread, app.own_aci, None).await;
             app.mark_read(&thread);
-            app.open_chat(thread.clone(), name, LoadedChat {
-                messages,
-                expire_timer,
-                delivered,
-                read,
-                reactions,
-                sender_names,
-            });
-
-            if let Err(e) = signal::send_read_receipts(manager, to_ack).await {
-                tracing::warn!("send_read_receipts: {e}");
-            }
+            app.open_chat(thread, name, view, sender_names);
+            ack_unseen(app, manager).await;
         }
         AppCmd::OpenContactBrowser => {
             let (contacts, split) = signal::list_all_contacts(manager, app.own_aci).await?;
@@ -1011,10 +1061,8 @@ async fn execute_cmd<S: Store>(
                     Ok(pts) => pts,
                     Err((msg, failed_path)) => {
                         chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
-                        if let Some(sel) = chat.selected_attachment {
-                            let len = chat.staged_attachments.len();
-                            chat.selected_attachment = if len == 0 { None } else { Some(sel.min(len - 1)) };
-                        }
+                        chat.selected_attachment =
+                            chat.selected_attachment.and_then(|sel| clamp_selection(sel, chat.staged_attachments.len()));
                         chat.status = Some(msg);
                         return Ok(());
                     }
@@ -1241,32 +1289,15 @@ async fn execute_cmd<S: Store>(
         }
         AppCmd::DeleteMessage => {
             // Ownership and age were checked when the second d was pressed.
-            let (thread, timestamp, sel_idx) = match app.chat.as_ref() {
-                Some(chat) => {
-                    let idx = match chat.selected_message {
-                        Some(i) => i,
-                        None => return Ok(()),
-                    };
-                    let msg = match chat.messages.get(idx) {
-                        Some(m) => m,
-                        None => return Ok(()),
-                    };
-                    (chat.thread.clone(), msg.timestamp(), idx)
-                }
-                None => return Ok(()),
-            };
+            let Some(chat) = app.chat.as_ref() else { return Ok(()) };
+            let Some(sel_idx) = chat.selected_message else { return Ok(()) };
+            let Some(timestamp) = chat.messages.get(sel_idx).map(|m| m.timestamp()) else { return Ok(()) };
+            let thread = chat.thread.clone();
             signal::delete_for_everyone(manager, &thread, timestamp).await?;
+            // The store row is gone; the reload drops the message, and with it the selection.
+            reload_chat(manager, &thread, &mut app.chat).await;
             if let Some(chat) = &mut app.chat {
-                let mut remaining = std::mem::take(&mut chat.messages);
-                remaining.remove(sel_idx);
-                chat.set_messages(remaining);
-                // The deleted message had the selection; move it to the neighbour.
-                let new_len = chat.messages.len();
-                chat.selected_message = if new_len == 0 {
-                    None
-                } else {
-                    Some(sel_idx.min(new_len - 1))
-                };
+                chat.selected_message = clamp_selection(sel_idx, chat.messages.len());
             }
         }
     }
@@ -1332,55 +1363,7 @@ pub async fn run<S: Store>(
                 }
                 event = next_or_pending(&mut signal_stream) => {
                     if let Some(received) = event {
-                        if let Received::Content(content) = &received {
-                            let names = signal::mention_names(&manager, content).await;
-                            if let Some(update) = signal::extract_update(content, |u| signal::name_or_uuid(&names, u)) {
-                                let from_self = app.own_aci == Some(content.metadata.sender.raw_uuid());
-                                if let Some(update) = app.apply_update(update, from_self) {
-                                    let name = signal::thread_title(&manager, &update.thread).await;
-                                    app.add_thread(update, name, from_self);
-                                }
-                            }
-                        }
-                        // Reload the open chat when the event can change what it shows.
-                        if matches!(app.view, View::ChatWindow)
-                            && let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone())
-                            && signal::affects_thread(&received, &thread)
-                        {
-                            // Snapshot known timestamps before reload so we only
-                            // ack messages that weren't visible when the chat opened.
-                            let known: HashSet<u64> = app.chat.as_ref()
-                                .map(|c| c.messages.iter().map(|m| m.timestamp()).collect())
-                                .unwrap_or_default();
-
-                            if let Ok((msgs, reactions)) = signal::load_messages_and_reactions(&manager, &thread).await {
-                                let own_aci = app.own_aci;
-                                let oldest_own = signal::oldest_own_message_ts(&msgs, own_aci);
-                                let receipt_state = signal::load_receipt_state(&manager, &thread, oldest_own).await.ok();
-                                let expire_timer = signal::expire_timer(&manager, &thread).await;
-
-                                let to_ack: Vec<(Uuid, u64)> = msgs
-                                    .iter()
-                                    .filter(|m| !known.contains(&m.timestamp()))
-                                    .filter(|m| own_aci.is_none_or(|a| a != m.metadata.sender.raw_uuid()))
-                                    .map(|m| (m.metadata.sender.raw_uuid(), m.timestamp()))
-                                    .collect();
-
-                                if let Some(chat) = &mut app.chat {
-                                    chat.set_messages(msgs);
-                                    chat.expire_timer = expire_timer;
-                                    if let Some((del, rd)) = receipt_state {
-                                        chat.delivered = del;
-                                        chat.read = rd;
-                                    }
-                                    chat.reactions = reactions;
-                                }
-
-                                if let Err(e) = signal::send_read_receipts(&mut manager, to_ack).await {
-                                    tracing::warn!("send_read_receipts: {e}");
-                                }
-                            }
-                        }
+                        on_live_event(&mut app, &mut manager, &received).await;
                     } else {
                         // Drop the dead stream so the next iteration's next_or_pending
                         // sleeps on future::pending() rather than re-polling a closed stream.

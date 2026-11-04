@@ -241,7 +241,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     for (msg_idx, content) in chat.messages.iter().enumerate() {
         let ts = content.timestamp();
         let sender_uuid = content.metadata.sender.raw_uuid();
-        let is_own = own_aci.is_some_and(|a| a == sender_uuid);
+        let is_own = signal::is_own(content, own_aci);
         let is_selected = selected == Some(msg_idx);
 
         let sender_label = chat.display_name(sender_uuid, own_aci);
