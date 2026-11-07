@@ -73,7 +73,7 @@ Delete-for-everyone is `dd` (two-press confirmation, guarded by `pending_d`).
 - `sst.log` — tracing output (`RUST_LOG=debug` or `RUST_LOG=presage=debug` for more)
 - `sst.lock` — `fd_lock` exclusive lock for interactive/session-holding subcommands
 - `sst.sock` — send socket, served by the TUI or `sst watch` while running; a stale file is replaced on the next start
-- `known_contacts`, `known_groups` — contacts and groups seen in message traffic, which presage does not enumerate; written by the startup drain and, for contacts, by the live fold
+- `known_contacts`, `known_groups` — contacts and groups seen in message traffic, which presage does not enumerate; written by the startup drain and by the live fold
 
 `--db <path>` overrides the store location; the log and lock still go next to it (parent directory).
 

@@ -304,12 +304,18 @@ pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Op
     Some(MessageUpdate { thread, sender, preview, ts, edit_of })
 }
 
-/// Record a contact first seen in live traffic, so later runs enumerate their thread.
-pub fn remember_contact(data_dir: &Path, uuid: Uuid) {
-    let path = known_contacts_path(data_dir);
-    let mut known = load_chunks::<16>(&path);
-    if known.insert(*uuid.as_bytes()) {
-        let _ = save_chunks(&path, &known);
+/// Record a thread first seen in live traffic, so later runs enumerate it.
+pub fn remember_thread(data_dir: &Path, thread: &Thread) {
+    match thread {
+        Thread::Contact(sid) => remember(&known_contacts_path(data_dir), *sid.raw_uuid().as_bytes()),
+        Thread::Group(key) => remember(&known_groups_path(data_dir), *key),
+    }
+}
+
+fn remember<const N: usize>(path: &Path, item: [u8; N]) {
+    let mut known = load_chunks::<N>(path);
+    if known.insert(item) {
+        let _ = save_chunks(path, &known);
     }
 }
 

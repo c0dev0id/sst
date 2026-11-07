@@ -949,10 +949,9 @@ async fn fold_live_message<S: Store>(app: &mut App, manager: &Manager<S, Registe
     let names = signal::mention_names(manager, content).await;
     let Some(update) = signal::extract_update(content, |u| signal::name_or_uuid(&names, u)) else { return };
     if let Some(update) = app.apply_update(update) {
-        if let Thread::Contact(sid) = &update.thread
-            && app.own_aci != Some(sid.raw_uuid())
-        {
-            signal::remember_contact(&app.data_dir, sid.raw_uuid());
+        let own_thread = matches!(&update.thread, Thread::Contact(sid) if app.own_aci == Some(sid.raw_uuid()));
+        if !own_thread {
+            signal::remember_thread(&app.data_dir, &update.thread);
         }
         let name = signal::thread_title(manager, &update.thread).await;
         app.add_thread(update, name);
