@@ -32,20 +32,28 @@ pub enum Mode {
     Command(String),
 }
 
-/// What the store holds for a thread, as the chat window shows it.
+/// What the store holds for a thread, as the chat window shows it. Receipts are
+/// scanned on open only; afterwards live receipts fold in as they arrive.
 pub struct ChatView {
     pub messages: Vec<Content>,
     pub reactions: ReactionMap,
-    pub delivered: HashSet<u64>,
-    pub read: HashSet<u64>,
+    pub receipts: Option<(HashSet<u64>, HashSet<u64>)>,
     pub expire_timer: Option<u32>,
 }
 
-async fn load_chat_view<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> anyhow::Result<ChatView> {
+async fn load_chat_view<S: Store>(
+    manager: &Manager<S, Registered>,
+    thread: &Thread,
+    with_receipts: bool,
+) -> anyhow::Result<ChatView> {
     let (messages, reactions) = signal::load_messages_and_reactions(manager, thread, None).await?;
-    let (delivered, read) = signal::load_receipt_state(manager, thread, &messages).await.unwrap_or_default();
+    let receipts = if with_receipts {
+        Some(signal::load_receipt_state(manager, thread, &messages).await.unwrap_or_default())
+    } else {
+        None
+    };
     let expire_timer = signal::expire_timer(manager, thread).await;
-    Ok(ChatView { messages, reactions, delivered, read, expire_timer })
+    Ok(ChatView { messages, reactions, receipts, expire_timer })
 }
 
 pub struct ChatState {
@@ -89,8 +97,10 @@ impl ChatState {
     pub fn apply(&mut self, view: ChatView) {
         self.set_messages(view.messages);
         self.reactions = view.reactions;
-        self.delivered = view.delivered;
-        self.read = view.read;
+        if let Some((delivered, read)) = view.receipts {
+            self.delivered = delivered;
+            self.read = read;
+        }
         self.expire_timer = view.expire_timer;
     }
 
@@ -155,6 +165,7 @@ impl App {
     }
 
     pub fn open_chat(&mut self, thread: Thread, thread_name: String, view: ChatView, sender_names: HashMap<Uuid, String>) {
+        let (delivered, read) = view.receipts.unwrap_or_default();
         self.chat = Some(ChatState {
             thread,
             thread_name,
@@ -166,8 +177,8 @@ impl App {
             input: String::new(),
             cursor: 0,
             selected_message: None,
-            delivered: view.delivered,
-            read: view.read,
+            delivered,
+            read,
             reactions: view.reactions,
             mode: Mode::Normal,
             reply_to: None,
@@ -921,7 +932,7 @@ async fn on_live_event<S: Store>(app: &mut App, manager: &mut Manager<S, Registe
             chat.apply_receipt(receipt);
         }
     } else if signal::is_message_in(received, &thread) {
-        match load_chat_view(manager, &thread).await {
+        match load_chat_view(manager, &thread, false).await {
             Ok(view) => {
                 if let Some(chat) = &mut app.chat {
                     chat.apply(view);
@@ -1028,7 +1039,7 @@ async fn open_chat_from_store<S: Store>(
     thread: Thread,
     name: String,
 ) -> anyhow::Result<()> {
-    let view = load_chat_view(manager, &thread).await?;
+    let view = load_chat_view(manager, &thread, true).await?;
     let (sender_names, mut unnamed) = signal::roster_names(manager, &thread, app.own_aci, None).await;
     app.mark_read(&thread);
     app.open_chat(thread, name, view, sender_names);
