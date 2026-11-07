@@ -342,8 +342,9 @@ async fn run<S: Store>(
         None => {
             let stream = signal::connect(&mut manager, &data_dir).await?;
             eprintln!("Loading chats…");
-            let threads = signal::list_threads(&manager, &data_dir, own, &signal::LastSeen::load(&data_dir)).await?;
-            app::run(threads, own, data_dir, manager, stream).await
+            let threads = signal::list_threads(&manager, &data_dir, own).await?;
+            let last_seen = signal::LastSeen::load(&data_dir);
+            app::run(threads, own, data_dir, last_seen, manager, stream).await
         }
 
         Some(Cmd::Link) => {
@@ -355,7 +356,8 @@ async fn run<S: Store>(
             if may_sync {
                 signal::sync(&mut manager, &data_dir).await?;
             }
-            let threads = signal::list_threads(&manager, &data_dir, own, &signal::LastSeen::load(&data_dir)).await?;
+            let threads = signal::list_threads(&manager, &data_dir, own).await?;
+            let last_seen = signal::LastSeen::load(&data_dir);
             for entry in &threads {
                 match format {
                     Format::Text => {
@@ -364,7 +366,7 @@ async fn run<S: Store>(
                             _ => println!("{}", entry.name),
                         }
                     }
-                    Format::Json => println!("{}", chat_record(entry)),
+                    Format::Json => println!("{}", chat_record(entry, &last_seen)),
                 }
             }
             Ok(())
@@ -548,13 +550,13 @@ fn since_to_millis(spec: &str, now_ms: u64) -> anyhow::Result<u64> {
 // The JSON records are an interface (mcpd parses them): one builder per record,
 // key sets pinned by tests and listed in the README.
 
-fn chat_record(entry: &signal::ThreadEntry) -> serde_json::Value {
+fn chat_record(entry: &signal::ThreadEntry, last_seen: &signal::LastSeen) -> serde_json::Value {
     serde_json::json!({
         "id":        signal::thread_id(&entry.thread),
         "name":      entry.name,
         "preview":   entry.last_preview,
         "timestamp": iso_timestamp(entry.last_ts),
-        "unread":    entry.unread,
+        "unread":    entry.unread(last_seen),
     })
 }
 
@@ -653,8 +655,9 @@ mod tests {
     #[test]
     fn json_records_keep_their_fields() {
         let thread = signal::parse_thread_id("11111111-1111-1111-1111-111111111111").unwrap();
-        let entry = signal::ThreadEntry::new(thread.clone(), "Alice".to_string(), Some("hi".to_string()), 1_000);
-        assert_eq!(keys(&chat_record(&entry)), ["id", "name", "preview", "timestamp", "unread"]);
+        let entry = signal::ThreadEntry::new(thread.clone(), "Alice".to_string(), Some("hi".to_string()), 1_000, false);
+        let last_seen = signal::LastSeen::load(Path::new("/nonexistent"));
+        assert_eq!(keys(&chat_record(&entry, &last_seen)), ["id", "name", "preview", "timestamp", "unread"]);
         assert_eq!(keys(&contact_record(&entry)), ["id", "name", "type"]);
         assert_eq!(contact_record(&entry)["type"], "contact");
         assert_eq!(

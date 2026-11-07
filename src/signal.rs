@@ -61,14 +61,17 @@ pub struct ThreadEntry {
     pub name: String,
     pub last_preview: Option<String>,
     pub last_ts: u64,
-    pub unread: bool,
+    pub last_from_self: bool,
 }
 
 impl ThreadEntry {
-    // Constructors never set unread=true: list_threads derives it from the
-    // last-seen marks and the live fold in app.rs sets it for new messages.
-    pub fn new(thread: Thread, name: String, last_preview: Option<String>, last_ts: u64) -> Self {
-        Self { thread, name, last_preview, last_ts, unread: false }
+    pub fn new(thread: Thread, name: String, last_preview: Option<String>, last_ts: u64, last_from_self: bool) -> Self {
+        Self { thread, name, last_preview, last_ts, last_from_self }
+    }
+
+    /// Newer than the user's last-seen mark and not their own message.
+    pub fn unread(&self, last_seen: &LastSeen) -> bool {
+        !self.last_from_self && self.last_ts > last_seen.get(&self.thread)
     }
 }
 
@@ -423,21 +426,16 @@ async fn known_threads<S: Store>(
 }
 
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
-/// Sorted most-recent-first; threads with no messages are omitted. A thread is
-/// unread when its newest message is from someone else and newer than the mark.
+/// Sorted most-recent-first; threads with no messages are omitted.
 pub async fn list_threads<S: Store>(
     manager: &Manager<S, Registered>,
     data_dir: &Path,
     own_aci: Option<Uuid>,
-    last_seen: &LastSeen,
 ) -> anyhow::Result<Vec<ThreadEntry>> {
     let mut entries: Vec<ThreadEntry> = Vec::new();
     for (thread, name) in known_threads(manager, data_dir, own_aci).await? {
         if let Some(latest) = last_message(manager, &thread).await {
-            let unread = !latest.from_self && latest.ts > last_seen.get(&thread);
-            let mut entry = ThreadEntry::new(thread, name, Some(latest.preview), latest.ts);
-            entry.unread = unread;
-            entries.push(entry);
+            entries.push(ThreadEntry::new(thread, name, Some(latest.preview), latest.ts, latest.from_self));
         }
     }
     sort_recent_first(&mut entries);
@@ -537,7 +535,7 @@ pub async fn list_all_contacts<S: Store>(
         let service_id = ServiceId::Aci(contact.uuid.into());
         let thread = Thread::Contact(service_id);
         let name = or_uuid(contact_display_name(manager, &contact).await, contact.uuid);
-        contact_entries.push(ThreadEntry::new(thread, name, None, 0));
+        contact_entries.push(ThreadEntry::new(thread, name, None, 0, false));
     }
     contact_entries.sort_by_key(|e| e.name.to_lowercase());
     let contacts_len = contact_entries.len();
@@ -552,7 +550,7 @@ pub async fn list_all_contacts<S: Store>(
             continue;
         }
         let thread = Thread::Group(master_key);
-        group_entries.push(ThreadEntry::new(thread, group.title, None, 0));
+        group_entries.push(ThreadEntry::new(thread, group.title, None, 0, false));
     }
     group_entries.sort_by_key(|e| e.name.to_lowercase());
 

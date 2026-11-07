@@ -42,7 +42,7 @@ fn draw_thread_list(f: &mut Frame, app: &mut App, area: Rect) {
         .threads
         .iter()
         .map(|t| {
-            let prefix = if t.unread { "* " } else { "  " };
+            let prefix = if t.unread(&app.last_seen) { "* " } else { "  " };
             let text = match t.last_preview.as_deref() {
                 Some(p) if !p.is_empty() => {
                     let collapsed = p.lines().collect::<Vec<_>>().join(" ");

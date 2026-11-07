@@ -46,7 +46,7 @@ Seven files under `src/`. Read in this order for a first pass:
 ```
 tokio::select! {
     event = events.next()              => on_key / on_paste → execute_cmd
-    event = next_or_pending(&mut stream) => on_live_event: fold into thread list; receipt → fold into ticks; message in open thread → load_chat_view
+    event = next_or_pending(&mut stream) => on_live_event: fold into thread list; receipt → fold into ticks; message in open thread → reload_chat
     Some(job) = send_jobs.recv()         => handle_send_job: a send from `sst send`, then shown like a live event
 }
 ```
@@ -55,7 +55,7 @@ tokio::select! {
 - Signal events come from `Manager::receive_messages() -> Stream<Item = Received>`. The stream can and will die (see `decisions.md` "The receive stream can end") — when it does, `next_or_pending` returns `None`, we sleep 500 ms and attempt `receive_messages()` again. `signal_stream` is `Option<Pin<Box<...>>>`; `None` means "reconnecting".
 - A panic hook restores the terminal (raw mode off, alt-screen out, bracketed paste off) so an unexpected panic doesn't corrupt the user's shell. Do not remove.
 - `ui.rs` runs synchronously inside `terminal.draw(...)`; `execute_cmd` runs outside it and awaits Signal I/O. Keep Signal calls out of the draw path.
-- The open chat is reloaded (`load_chat_view`) only for a message in that thread (`signal::is_message_in`). A live receipt (`signal::live_receipt`) folds straight into the delivered/read sets without touching the store. Typing indicators do nothing.
+- The open chat is reloaded (`reload_chat`) only for a message in that thread (`signal::is_message_in`). Unread is never stored: `ThreadEntry::unread` derives it from `last_from_self` and the last-seen mark. A live receipt (`signal::live_receipt`) folds straight into the delivered/read sets without touching the store. Typing indicators do nothing.
 
 ## Commands are colon commands, not slash commands
 
