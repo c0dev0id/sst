@@ -20,6 +20,8 @@ make test       # cargo test
 make install    # install release binary to ~/.bin/sst
 ```
 
+CI (`.github/workflows/ci.yml`) runs check, clippy with warnings denied and the tests on Linux for every push; keep clippy clean. OpenBSD builds stay manual.
+
 `cargo test <name>` runs a single test. Tests live in `#[cfg(test)]` modules next to the code they cover; `signal.rs` has the mention codec tests. Add tests as pure logic accumulates (cursor helpers, thread-id parsing, emoji resolution, reaction map folding).
 
 **OpenBSD build environment:** `.cargo/config.toml` sets `LIBSQLITE3_SYS_USE_PKG_CONFIG=1` and `presage-store-sqlite` is pulled with `default-features = false`. This forces linking against system `libsqlite3` (LibreSSL-compatible) instead of the bundled SQLCipher build (which needs OpenSSL 3.x `EVP_MAC` APIs missing from LibreSSL). Do not remove either — see dev journal "OpenBSD SQLite workaround".

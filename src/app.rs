@@ -363,48 +363,44 @@ impl App {
                             self.status = Some("d again to delete for everyone".to_string());
                         }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if !chat.messages.is_empty() {
-                            if let Some(i) = chat.selected_attachment {
-                                if i == 0 {
-                                    chat.selected_attachment = None;
-                                    chat.selected_message = Some(chat.messages.len() - 1);
-                                } else {
-                                    chat.selected_attachment = Some(i - 1);
-                                }
-                            } else if let Some(s) = chat.selected_message {
-                                if s == 0 && !chat.staged_attachments.is_empty() {
-                                    chat.selected_message = None;
-                                    chat.selected_attachment = Some(chat.staged_attachments.len() - 1);
-                                } else {
-                                    chat.selected_message = Some(s.saturating_sub(1));
-                                }
-                            } else {
+                    KeyCode::Up | KeyCode::Char('k') if !chat.messages.is_empty() => {
+                        if let Some(i) = chat.selected_attachment {
+                            if i == 0 {
+                                chat.selected_attachment = None;
                                 chat.selected_message = Some(chat.messages.len() - 1);
+                            } else {
+                                chat.selected_attachment = Some(i - 1);
                             }
+                        } else if let Some(s) = chat.selected_message {
+                            if s == 0 && !chat.staged_attachments.is_empty() {
+                                chat.selected_message = None;
+                                chat.selected_attachment = Some(chat.staged_attachments.len() - 1);
+                            } else {
+                                chat.selected_message = Some(s.saturating_sub(1));
+                            }
+                        } else {
+                            chat.selected_message = Some(chat.messages.len() - 1);
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if !chat.messages.is_empty() {
-                            if let Some(i) = chat.selected_attachment {
-                                let last = chat.staged_attachments.len().saturating_sub(1);
-                                if i >= last {
-                                    chat.selected_attachment = None;
-                                    chat.selected_message = Some(0);
-                                } else {
-                                    chat.selected_attachment = Some(i + 1);
-                                }
-                            } else if let Some(sel) = chat.selected_message {
-                                let last_msg = chat.messages.len() - 1;
-                                if sel >= last_msg && !chat.staged_attachments.is_empty() {
-                                    chat.selected_message = None;
-                                    chat.selected_attachment = Some(0);
-                                } else {
-                                    chat.selected_message = Some((sel + 1).min(last_msg));
-                                }
+                    KeyCode::Down | KeyCode::Char('j') if !chat.messages.is_empty() => {
+                        if let Some(i) = chat.selected_attachment {
+                            let last = chat.staged_attachments.len().saturating_sub(1);
+                            if i >= last {
+                                chat.selected_attachment = None;
+                                chat.selected_message = Some(0);
                             } else {
-                                chat.selected_message = Some(chat.viewport_top_msg);
+                                chat.selected_attachment = Some(i + 1);
                             }
+                        } else if let Some(sel) = chat.selected_message {
+                            let last_msg = chat.messages.len() - 1;
+                            if sel >= last_msg && !chat.staged_attachments.is_empty() {
+                                chat.selected_message = None;
+                                chat.selected_attachment = Some(0);
+                            } else {
+                                chat.selected_message = Some((sel + 1).min(last_msg));
+                            }
+                        } else {
+                            chat.selected_message = Some(chat.viewport_top_msg);
                         }
                     }
                     _ => {}

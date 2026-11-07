@@ -636,7 +636,7 @@ pub async fn list_all_contacts<S: Store>(
         let name = or_uuid(contact_display_name(manager, &contact).await, contact.uuid);
         contact_entries.push(ThreadEntry::new(thread, name, None, 0));
     }
-    contact_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    contact_entries.sort_by_key(|e| e.name.to_lowercase());
     let contacts_len = contact_entries.len();
 
     let mut group_entries: Vec<ThreadEntry> = Vec::new();
@@ -651,7 +651,7 @@ pub async fn list_all_contacts<S: Store>(
         let thread = Thread::Group(master_key);
         group_entries.push(ThreadEntry::new(thread, group.title, None, 0));
     }
-    group_entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    group_entries.sort_by_key(|e| e.name.to_lowercase());
 
     contact_entries.extend(group_entries);
     Ok((contact_entries, contacts_len))
