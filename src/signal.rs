@@ -477,6 +477,15 @@ pub fn extract_update(content: &Content, name_of: impl Fn(Uuid) -> String) -> Op
     Some(MessageUpdate { thread, sender, preview, ts, edit_of })
 }
 
+/// Record a contact first seen in live traffic, so later runs enumerate their thread.
+pub fn remember_contact(data_dir: &Path, uuid: Uuid) {
+    let path = known_contacts_path(data_dir);
+    let mut known = load_chunks::<16>(&path);
+    if known.insert(*uuid.as_bytes()) {
+        let _ = save_chunks(&path, &known);
+    }
+}
+
 /// Every thread the store knows, with its display name: contacts, contacts
 /// seen only in message traffic, and groups.
 async fn known_threads<S: Store>(

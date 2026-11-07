@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `send`, `print`, and `print-last` no longer require the exclusive instance lock, so they can run concurrently with the TUI or `sst watch`. This enables scripting patterns such as watching for incoming messages in one process and sending replies from another.
 
 ### Fixed
+- `sst recent` names former group members and people mentioned from outside the roster the way `print` does; they showed as UUIDs. A contact whose first message arrives while the TUI is open is now known to `chats` and `recent` after a restart.
 - Re-opening a chat no longer re-sends read receipts for messages already acknowledged in this session, and receipts arriving while a group chat is open update the ticks directly instead of rescanning every member's thread.
 - Own messages in group chats now show ✓ and ✓✓: members' receipts arrive in their 1:1 threads and were never consulted. Read receipts are sent for group messages too, to each author. Reading a chat in sst now also clears its unread state on your other devices via a read sync.
 - Contacts without an address-book name show their Signal profile name instead of a phone number or UUID, everywhere the name appears.
