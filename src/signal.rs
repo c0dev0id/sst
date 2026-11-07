@@ -559,17 +559,12 @@ pub async fn recent_messages<S: Store>(
         let (messages, _) = load_messages_and_reactions(manager, &thread, Some(since_ms)).await?;
         let from_others: Vec<Content> = messages
             .into_iter()
-            .filter(|m| !is_own(m, Some(own)))
-            .filter(|m| !mentions_only || mentioned_acis(m).contains(&own))
+            .filter(|m| !is_own(m, Some(own)) && (!mentions_only || mentions_account(m, own)))
             .collect();
         if from_others.is_empty() {
             continue;
         }
-        let wanted: HashSet<Uuid> = from_others
-            .iter()
-            .flat_map(|m| std::iter::once(m.metadata.sender.raw_uuid()).chain(mentioned_acis(m)))
-            .collect();
-        let names = load_sender_names(manager, &thread, None, Some(&wanted)).await;
+        let names = names_for_messages(manager, &thread, &from_others).await;
         for message in from_others {
             let sender = message.metadata.sender.raw_uuid();
             recent.push(RecentMessage {
@@ -579,7 +574,7 @@ pub async fn recent_messages<S: Store>(
                 sender,
                 sender_name: name_or_uuid(&names, sender),
                 body: message_body(&message, |u| name_or_uuid(&names, u)),
-                mentions_me: mentioned_acis(&message).contains(&own),
+                mentions_me: mentions_account(&message, own),
             });
         }
     }
@@ -590,22 +585,27 @@ pub async fn recent_messages<S: Store>(
     Ok(recent)
 }
 
-/// A `--since` value as unix milliseconds: an RFC 3339 timestamp, or a
-/// duration back from `now_ms` such as `30m`, `2h` or `7d`.
-pub fn since_to_millis(spec: &str, now_ms: u64) -> anyhow::Result<u64> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(spec) {
-        return u64::try_from(dt.timestamp_millis()).context("timestamp before 1970");
+/// Names for everyone who appears in `messages` as sender or mention: the
+/// thread's roster first (members outside the contact store get a cached
+/// profile fetch), then the contact store for anyone else.
+pub async fn names_for_messages<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    messages: &[Content],
+) -> HashMap<Uuid, String> {
+    let wanted: HashSet<Uuid> = messages
+        .iter()
+        .flat_map(|m| std::iter::once(m.metadata.sender.raw_uuid()).chain(mentioned_acis(m)))
+        .collect();
+    let mut names = load_sender_names(manager, thread, None, Some(&wanted)).await;
+    for uuid in wanted {
+        if !names.contains_key(&uuid)
+            && let Some(name) = lookup_contact_name(manager, uuid).await
+        {
+            names.insert(uuid, name);
+        }
     }
-    let invalid = || anyhow::anyhow!("invalid --since '{spec}': use an RFC 3339 timestamp or a duration like 30m, 2h, 7d");
-    let unit = spec.chars().last().ok_or_else(invalid)?;
-    let amount: u64 = spec[..spec.len() - unit.len_utf8()].parse().map_err(|_| invalid())?;
-    let unit_ms: u64 = match unit {
-        'm' => 60_000,
-        'h' => 3_600_000,
-        'd' => 86_400_000,
-        _ => return Err(invalid()),
-    };
-    Ok(now_ms.saturating_sub(amount.saturating_mul(unit_ms)))
+    names
 }
 
 /// Load every contact and group regardless of message history.
@@ -912,6 +912,11 @@ fn substitute_mentions(body: &str, ranges: &[BodyRange], name_of: impl Fn(Uuid) 
         units.splice(start..end, label);
     }
     String::from_utf16_lossy(&units)
+}
+
+/// Whether the message @-mentions `aci`.
+pub fn mentions_account(content: &Content, aci: Uuid) -> bool {
+    mentioned_acis(content).contains(&aci)
 }
 
 /// Accounts mentioned in the message body.
@@ -1768,18 +1773,6 @@ mod tests {
         assert!(matches!(parse_thread_id(&"ab".repeat(32)), Ok(Thread::Group(_))));
         assert!(parse_thread_id("not-a-recipient").is_err());
         assert!(parse_thread_id(&"zz".repeat(32)).is_err());
-    }
-
-    #[test]
-    fn since_accepts_durations_and_timestamps() {
-        let now = 1_000_000_000_000;
-        assert_eq!(since_to_millis("30m", now).unwrap(), now - 30 * 60_000);
-        assert_eq!(since_to_millis("2h", now).unwrap(), now - 2 * 3_600_000);
-        assert_eq!(since_to_millis("7d", now).unwrap(), now - 7 * 86_400_000);
-        assert_eq!(since_to_millis("1970-01-01T00:00:01+00:00", now).unwrap(), 1_000);
-        for bad in ["", "soon", "2x", "h", "2026-11-04"] {
-            assert!(since_to_millis(bad, now).is_err(), "{bad}");
-        }
     }
 
     #[test]

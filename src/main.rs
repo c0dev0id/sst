@@ -133,6 +133,17 @@ enum Cmd {
     },
 }
 
+impl Cmd {
+    /// Subcommands that read the store as is when another instance holds the
+    /// session, and sync first only when the lock is free.
+    fn can_run_beside_another_instance(&self) -> bool {
+        matches!(
+            self,
+            Cmd::Chats { .. } | Cmd::Contacts { .. } | Cmd::Print { .. } | Cmd::PrintLast { .. } | Cmd::Recent { .. }
+        )
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -200,24 +211,15 @@ fn open_lock_file(data_dir: &Path) -> anyhow::Result<fd_lock::RwLock<std::fs::Fi
     Ok(fd_lock::RwLock::new(file))
 }
 
-/// Run a subcommand that uses the store directly. Interactive and streaming
-/// subcommands need the Signal session to themselves and fail if another
-/// instance holds the lock. The listing subcommands take the lock when it is
-/// free so they can sync first; when another instance holds it, that instance
-/// keeps the store current and they read it as is.
+/// Run a subcommand that uses the store directly. The TUI, watch and link
+/// need the Signal session to themselves and fail if another instance holds
+/// the lock; the others degrade to reading the store (see Cmd).
 async fn run_locked(cmd: Option<Cmd>, db_path: PathBuf, data_dir: PathBuf) -> anyhow::Result<()> {
-    let read_only_is_fine = matches!(
-        cmd,
-        Some(Cmd::Chats { .. })
-            | Some(Cmd::Contacts { .. })
-            | Some(Cmd::Print { .. })
-            | Some(Cmd::PrintLast { .. })
-            | Some(Cmd::Recent { .. })
-    );
+    let can_share = cmd.as_ref().is_some_and(Cmd::can_run_beside_another_instance);
     let mut lock = open_lock_file(&data_dir)?;
     let lock_guard = match lock.try_write() {
         Ok(guard) => Some(guard),
-        Err(_) if read_only_is_fine => None,
+        Err(_) if can_share => None,
         Err(_) => anyhow::bail!(
             "another sst instance is already running\n\
              (only one instance may use the Signal session at a time)"
@@ -434,7 +436,7 @@ async fn run<S: Store>(
             if may_sync {
                 signal::sync(&mut manager, &data_dir).await?;
             }
-            let since_ms = signal::since_to_millis(&since, signal::now_millis()?)?;
+            let since_ms = since_to_millis(&since, signal::now_millis()?)?;
             let recent = signal::recent_messages(&mut manager, &data_dir, since_ms, mentions_me, limit).await?;
             for m in &recent {
                 match format {
@@ -442,15 +444,13 @@ async fn run<S: Store>(
                         let mark = if m.mentions_me { "@ " } else { "" };
                         println!("[{}] {}{} / {}: {}", signal::fmt_ts_long(m.ts), mark, m.thread_name, m.sender_name, m.body);
                     }
-                    Format::Json => println!("{}", serde_json::json!({
-                        "timestamp":   iso_timestamp(m.ts),
-                        "chat_id":     thread_id_string(&m.thread),
-                        "chat_name":   m.thread_name,
-                        "sender_uuid": m.sender.to_string(),
-                        "sender_name": m.sender_name,
-                        "body":        m.body,
-                        "mentions_me": m.mentions_me,
-                    })),
+                    Format::Json => {
+                        let mut record = message_record(m.ts, m.sender, &m.sender_name, &m.body, None);
+                        record["chat_id"] = serde_json::Value::String(thread_id_string(&m.thread));
+                        record["chat_name"] = serde_json::Value::String(m.thread_name.clone());
+                        record["mentions_me"] = serde_json::Value::Bool(m.mentions_me);
+                        println!("{record}");
+                    }
                 }
             }
             Ok(())
@@ -537,31 +537,55 @@ async fn cache_mentioned_names<S: Store>(
     }
 }
 
-/// Print messages with names resolved like the TUI does, limited to the
-/// accounts that appear: the group roster (with cached profile fetches) first,
-/// then the contact store for anyone else.
 async fn print_messages<S: Store>(
     manager: &mut Manager<S, Registered>,
     thread: &Thread,
     messages: &[Content],
     format: &Format,
 ) {
-    let wanted: std::collections::HashSet<Uuid> = messages
-        .iter()
-        .flat_map(|m| std::iter::once(m.metadata.sender.raw_uuid()).chain(signal::mentioned_acis(m)))
-        .collect();
-    let mut names = signal::load_sender_names(manager, thread, None, Some(&wanted)).await;
+    let names = signal::names_for_messages(manager, thread, messages).await;
     for msg in messages {
         let uuid = msg.metadata.sender.raw_uuid();
-        let sender_name = cached_sender_name(&mut names, manager, uuid).await;
-        cache_mentioned_names(&mut names, manager, msg).await;
         let body = signal::message_body(msg, |u| signal::name_or_uuid(&names, u));
-        println!("{}", format_one(format, msg.timestamp(), uuid, &sender_name, &body, None));
+        let line = format_one(format, msg.timestamp(), uuid, &signal::name_or_uuid(&names, uuid), &body, None);
+        println!("{line}");
     }
 }
 
 fn iso_timestamp(ts_ms: u64) -> String {
     signal::ts_to_datetime(ts_ms).map_or_else(|| ts_ms.to_string(), |dt| dt.to_rfc3339())
+}
+
+/// A `--since` value as unix milliseconds: an RFC 3339 timestamp, or a
+/// duration back from `now_ms` such as `30m`, `2h` or `7d`.
+fn since_to_millis(spec: &str, now_ms: u64) -> anyhow::Result<u64> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(spec) {
+        return u64::try_from(dt.timestamp_millis()).context("timestamp before 1970");
+    }
+    let invalid = || anyhow::anyhow!("invalid --since '{spec}': use an RFC 3339 timestamp or a duration like 30m, 2h, 7d");
+    let unit = spec.chars().last().ok_or_else(invalid)?;
+    let amount: u64 = spec[..spec.len() - unit.len_utf8()].parse().map_err(|_| invalid())?;
+    let unit_ms: u64 = match unit {
+        'm' => 60_000,
+        'h' => 3_600_000,
+        'd' => 86_400_000,
+        _ => return Err(invalid()),
+    };
+    Ok(now_ms.saturating_sub(amount.saturating_mul(unit_ms)))
+}
+
+/// The JSON fields every message-printing subcommand shares.
+fn message_record(ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str, edit_of: Option<u64>) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "timestamp":   iso_timestamp(ts_ms),
+        "sender_uuid": sender_uuid.to_string(),
+        "sender_name": sender_name,
+        "body":        body,
+    });
+    if let Some(target) = edit_of {
+        record["edit_of"] = serde_json::Value::String(iso_timestamp(target));
+    }
+    record
 }
 
 fn format_one(
@@ -577,17 +601,23 @@ fn format_one(
             let edited = if edit_of.is_some() { " (edited)" } else { "" };
             format!("[{}] {}: {}{}", signal::fmt_ts_long(ts_ms), sender_name, body, edited)
         }
-        Format::Json => {
-            let mut record = serde_json::json!({
-                "timestamp":   iso_timestamp(ts_ms),
-                "sender_uuid": sender_uuid.to_string(),
-                "sender_name": sender_name,
-                "body":        body,
-            });
-            if let Some(target) = edit_of {
-                record["edit_of"] = serde_json::Value::String(iso_timestamp(target));
-            }
-            record.to_string()
+        Format::Json => message_record(ts_ms, sender_uuid, sender_name, body, edit_of).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::since_to_millis;
+
+    #[test]
+    fn since_accepts_durations_and_timestamps() {
+        let now = 1_000_000_000_000;
+        assert_eq!(since_to_millis("30m", now).unwrap(), now - 30 * 60_000);
+        assert_eq!(since_to_millis("2h", now).unwrap(), now - 2 * 3_600_000);
+        assert_eq!(since_to_millis("7d", now).unwrap(), now - 7 * 86_400_000);
+        assert_eq!(since_to_millis("1970-01-01T00:00:01+00:00", now).unwrap(), 1_000);
+        for bad in ["", "soon", "2x", "h", "2026-11-04"] {
+            assert!(since_to_millis(bad, now).is_err(), "{bad}");
         }
     }
 }
