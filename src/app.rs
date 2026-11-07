@@ -15,8 +15,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
+use crate::attachments::{self, StagedAttachment};
 use crate::ipc;
-use crate::signal::{self, ReactionMap, StagedAttachment, ThreadEntry, MessageUpdate};
+use crate::mentions;
+use crate::signal::{self, ReactionMap, ThreadEntry, MessageUpdate};
 
 pub enum View {
     ChatList,
@@ -1077,7 +1079,7 @@ async fn send_draft<S: Store>(app: &mut App, manager: &mut Manager<S, Registered
     let pointers = if staged.is_empty() {
         Vec::new()
     } else {
-        match signal::upload_staged_attachments(manager, &staged).await {
+        match attachments::upload_staged_attachments(manager, &staged).await {
             Ok(pts) => pts,
             Err((msg, failed_path)) => {
                 chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
@@ -1090,7 +1092,7 @@ async fn send_draft<S: Store>(app: &mut App, manager: &mut Manager<S, Registered
 
     let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_of);
     let targeted = chat.editing.is_some() || quoted.is_some();
-    let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
+    let (text, body_ranges) = mentions::encode_mentions(chat.input.trim(), &chat.sender_names);
     if text.is_empty() && pointers.is_empty() {
         return Ok(());
     }
@@ -1181,7 +1183,7 @@ fn stage_upload(app: &mut App, path: &str) {
         app.status = Some(":upload <path>".to_string());
         return;
     }
-    match signal::stage_attachment(std::path::Path::new(path)) {
+    match attachments::stage_attachment(std::path::Path::new(path)) {
         Ok(att) => {
             if let Some(chat) = &mut app.chat {
                 chat.staged_attachments.push(att);
@@ -1215,21 +1217,21 @@ async fn download<S: Store>(
                 app.status = Some(HINT_SELECT_FIRST.to_string());
                 return Ok(());
             };
-            let attachments = chat.messages.get(idx).map(signal::message_attachments).unwrap_or(&[]);
+            let attachments = chat.messages.get(idx).map(attachments::message_attachments).unwrap_or(&[]);
             attachments
                 .iter()
                 .enumerate()
-                .map(|(i, pointer)| (signal::attachment_filename(pointer, i), pointer.clone(), String::new()))
+                .map(|(i, pointer)| (attachments::attachment_filename(pointer, i), pointer.clone(), String::new()))
                 .collect()
         }
         DownloadScope::All => {
             let with_attachments: Vec<&Content> =
-                chat.messages.iter().filter(|m| !signal::message_attachments(m).is_empty()).collect();
+                chat.messages.iter().filter(|m| !attachments::message_attachments(m).is_empty()).collect();
             let mut queue = Vec::new();
             for (n, msg) in with_attachments.iter().enumerate() {
-                for pointer in signal::message_attachments(msg) {
+                for pointer in attachments::message_attachments(msg) {
                     let label = format!(" (message {}/{})", n + 1, with_attachments.len());
-                    queue.push((signal::attachment_filename(pointer, queue.len()), pointer.clone(), label));
+                    queue.push((attachments::attachment_filename(pointer, queue.len()), pointer.clone(), label));
                 }
             }
             queue
@@ -1254,7 +1256,7 @@ async fn download<S: Store>(
             app.status = Some(format!("downloading {}/{}{}…", i + 1, total, label));
             terminal.draw(|f| crate::ui::draw(f, app))?;
         }
-        signal::download_attachment(manager, pointer, &dir, filename)
+        attachments::download_attachment(manager, pointer, &dir, filename)
             .await
             .map_err(|e| anyhow::anyhow!("file {}: {e}", i + 1))?;
     }

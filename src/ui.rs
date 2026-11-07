@@ -8,6 +8,7 @@ use ratatui::Frame;
 use presage::store::ContentExt;
 
 use crate::app::{App, Mode, View};
+use crate::attachments;
 use crate::signal;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -189,7 +190,7 @@ fn draw_attachment_bar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("  Att:", Style::default().fg(Color::DarkGray)),
     ];
     for (i, att) in chat.staged_attachments.iter().enumerate() {
-        let label = format!(" [{}  {}]", signal::kind_from_mime(att.mime), signal::fmt_attachment_size(att.size));
+        let label = format!(" [{}  {}]", attachments::kind_from_mime(att.mime), attachments::fmt_attachment_size(att.size));
         let style = if chat.selected_attachment == Some(i) {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -502,7 +503,7 @@ fn chat_status_bar(app: &App) -> String {
                 let pos = format!("{}/{}", att_idx + 1, chat.staged_attachments.len());
                 return format!(
                     "  Att [{}]  {}  {}  |  dd remove   Esc deselect   q back",
-                    pos, signal::kind_from_mime(att.mime), signal::fmt_attachment_size(att.size)
+                    pos, attachments::kind_from_mime(att.mime), attachments::fmt_attachment_size(att.size)
                 );
             }
             if let Some(sel_idx) = chat.selected_message

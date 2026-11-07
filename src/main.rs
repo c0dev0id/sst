@@ -1,5 +1,7 @@
 mod app;
+mod attachments;
 mod ipc;
+mod mentions;
 mod signal;
 mod ui;
 
@@ -501,7 +503,7 @@ async fn cache_mentioned_names<S: Store>(
     manager: &Manager<S, Registered>,
     content: &Content,
 ) {
-    for aci in signal::mentioned_acis(content) {
+    for aci in mentions::mentioned_acis(content) {
         cached_sender_name(cache, manager, aci).await;
     }
 }

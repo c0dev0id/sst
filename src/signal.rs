@@ -14,8 +14,10 @@ use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
-use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, body_range::AssociatedValue, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::{self, Sent}};
-use presage::libsignal_service::sender::AttachmentSpec;
+use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::{self, Sent}};
+
+use crate::attachments::{stage_attachment, upload_staged_attachments};
+use crate::mentions::{encode_mentions, mention_ranges, mentioned_acis, mentions_account, substitute_mentions};
 
 /// Per-thread reaction state: target_ts → emoji → set of reactor UUID bytes.
 /// Apply in chronological order to handle add/remove toggles correctly.
@@ -102,181 +104,6 @@ pub fn is_own(content: &Content, own_aci: Option<Uuid>) -> bool {
     own_aci == Some(content.metadata.sender.raw_uuid())
 }
 
-
-#[derive(Clone)]
-pub struct StagedAttachment {
-    pub path: PathBuf,
-    pub mime: &'static str,
-    pub size: u64,
-}
-
-pub fn stage_attachment(path: &Path) -> Result<StagedAttachment, String> {
-    let meta = std::fs::metadata(path)
-        .map_err(|e| format!("{}: {}", path.display(), e))?;
-    if !meta.is_file() {
-        return Err(format!("{}: not a file", path.display()));
-    }
-    Ok(StagedAttachment {
-        path: path.to_path_buf(),
-        mime: mime_from_path(path),
-        size: meta.len(),
-    })
-}
-
-fn mime_from_path(path: &Path) -> &'static str {
-    let ext = path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png"  => "image/png",
-        "gif"  => "image/gif",
-        "webp" => "image/webp",
-        "heic" | "heif" => "image/heic",
-        "mp4"  => "video/mp4",
-        "mov"  => "video/quicktime",
-        "avi"  => "video/x-msvideo",
-        "webm" => "video/webm",
-        "mkv"  => "video/x-matroska",
-        "mp3"  => "audio/mpeg",
-        "m4a"  => "audio/mp4",
-        "ogg"  => "audio/ogg",
-        "opus" => "audio/opus",
-        "aac"  => "audio/aac",
-        "flac" => "audio/flac",
-        "wav"  => "audio/wav",
-        "pdf"  => "application/pdf",
-        "zip"  => "application/zip",
-        "tar"  => "application/x-tar",
-        "gz"   => "application/gzip",
-        "bz2"  => "application/x-bzip2",
-        _      => "application/octet-stream",
-    }
-}
-
-pub(crate) fn kind_from_mime(mime: &str) -> &'static str {
-    if mime == "image/gif" { "gif" }
-    else if mime.starts_with("image/") { "image" }
-    else if mime.starts_with("video/") { "video" }
-    else if mime.starts_with("audio/") { "audio" }
-    else { "file" }
-}
-
-// Signal caps attachments at ~100 MB, well below the u64→f64 precision boundary (2^53).
-#[allow(clippy::cast_precision_loss)]
-pub fn fmt_attachment_size(bytes: u64) -> String {
-    if bytes < 1_024 {
-        format!("{} B", bytes)
-    } else if bytes < 1_024 * 1_024 {
-        format!("{:.0} KB", bytes as f64 / 1_024.0)
-    } else if bytes < 1_024 * 1_024 * 1_024 {
-        format!("{:.1} MB", bytes as f64 / (1_024.0 * 1_024.0))
-    } else {
-        format!("{:.1} GB", bytes as f64 / (1_024.0 * 1_024.0 * 1_024.0))
-    }
-}
-
-const ATTACHMENT_FLAG_GIF: u32 = 8;
-
-/// Upload staged attachments one by one; on any failure returns an error with
-/// a human-readable message and the path of the file that failed, so the caller
-/// can remove just that entry and let the user retry.
-pub async fn upload_staged_attachments<S: Store>(
-    manager: &mut Manager<S, Registered>,
-    staged: &[StagedAttachment],
-) -> Result<Vec<AttachmentPointer>, (String, PathBuf)> {
-    let mut pointers = Vec::with_capacity(staged.len());
-    for att in staged {
-        let bytes = std::fs::read(&att.path)
-            .map_err(|e| (format!("{}: {}", att.path.display(), e), att.path.clone()))?;
-        let is_gif = att.mime == "image/gif";
-        let spec = AttachmentSpec {
-            content_type: att.mime.to_string(),
-            length: bytes.len(),
-            file_name: att.path.file_name().map(|n| n.to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-        let mut pointer = match manager.upload_attachment(spec, bytes).await {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => return Err((format!("upload failed: {e}"), att.path.clone())),
-            Err(e)     => return Err((format!("upload error: {e}"), att.path.clone())),
-        };
-        if is_gif {
-            pointer.flags = Some(pointer.flags.unwrap_or(0) | ATTACHMENT_FLAG_GIF);
-        }
-        pointers.push(pointer);
-    }
-    Ok(pointers)
-}
-
-/// Attachments the user may download. View-once media is excluded: linked
-/// devices show a placeholder for it, as the official clients do.
-pub fn message_attachments(content: &Content) -> &[AttachmentPointer] {
-    match data_message_of(content) {
-        Some(dm) if dm.is_view_once != Some(true) => &dm.attachments,
-        _ => &[],
-    }
-}
-
-/// Derive a filename for a downloaded attachment.
-/// Uses the pointer's fileName field when present; falls back to `attachment_N.<ext>`.
-pub fn attachment_filename(pointer: &AttachmentPointer, idx: usize) -> String {
-    if let Some(name) = &pointer.file_name
-        && !name.is_empty()
-    {
-        return name.clone();
-    }
-    let ext = pointer.content_type.as_deref()
-        .and_then(|ct| ct.split('/').nth(1))
-        .unwrap_or("bin");
-    format!("attachment_{}.{}", idx, ext)
-}
-
-/// Return a path in `dir` for `filename` that does not yet exist.
-/// Inserts `_N` before the extension on each collision.
-pub fn unique_path(dir: &Path, filename: &str) -> PathBuf {
-    let candidate = dir.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let stem = candidate.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
-    let ext  = candidate.extension().and_then(|e| e.to_str());
-    for n in 1u32.. {
-        let name = match ext {
-            Some(e) => format!("{}_{}.{}", stem, n, e),
-            None    => format!("{}_{}", stem, n),
-        };
-        let candidate = dir.join(&name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!()
-}
-
-/// Download and decrypt one attachment, writing atomically via a `.tmp` sibling.
-/// If the process is killed mid-download nothing is written; if killed mid-write
-/// only an orphaned `.tmp` is left, never a partial real file.
-pub async fn download_attachment<S: Store>(
-    manager: &Manager<S, Registered>,
-    pointer: &AttachmentPointer,
-    dir: &Path,
-    filename: &str,
-) -> Result<PathBuf, String> {
-    let final_path = unique_path(dir, filename);
-    let mut tmp_name = final_path.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_name);
-
-    let bytes = manager.get_attachment(pointer).await
-        .map_err(|e| format!("download failed: {e}"))?;
-    std::fs::write(&tmp_path, &bytes)
-        .map_err(|e| format!("{}: {e}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, &final_path)
-        .map_err(|e| format!("rename failed: {e}"))?;
-    Ok(final_path)
-}
 
 // Side files next to the store: groups and contacts seen in message traffic,
 // which presage does not enumerate on its own.
@@ -776,7 +603,7 @@ async fn last_message<S: Store>(
 }
 
 /// The DataMessage carried by incoming content or by a sync of our own sent message.
-fn data_message_of(content: &Content) -> Option<&DataMessage> {
+pub(crate) fn data_message_of(content: &Content) -> Option<&DataMessage> {
     match &content.body {
         ContentBody::DataMessage(msg) => Some(msg),
         ContentBody::SynchronizeMessage(SyncMessage {
@@ -891,50 +718,6 @@ pub fn message_text(content: &Content, name_of: impl Fn(Uuid) -> String) -> Stri
     }
 }
 
-/// Mention ranges as (start, length, aci); offsets are UTF-16 code units as on the wire.
-fn mention_ranges(ranges: &[BodyRange]) -> impl Iterator<Item = (usize, usize, Uuid)> + '_ {
-    ranges.iter().filter_map(|r| {
-        let aci = match r.associated_value.as_ref()? {
-            AssociatedValue::MentionAciBinary(bytes) => Uuid::from_slice(bytes).ok()?,
-            AssociatedValue::MentionAci(s) => Uuid::parse_str(s).ok()?,
-            AssociatedValue::Style(_) => return None,
-        };
-        Some((r.start? as usize, r.length? as usize, aci))
-    })
-}
-
-/// Replace each mention placeholder (U+FFFC) in `body` with `@Name`.
-fn substitute_mentions(body: &str, ranges: &[BodyRange], name_of: impl Fn(Uuid) -> String) -> String {
-    let mut mentions: Vec<(usize, usize, Uuid)> = mention_ranges(ranges).collect();
-    if mentions.is_empty() {
-        return body.to_string();
-    }
-    let mut units: Vec<u16> = body.encode_utf16().collect();
-    // Splice from the end so earlier offsets stay valid.
-    mentions.sort_by_key(|&(start, _, _)| std::cmp::Reverse(start));
-    for (start, len, aci) in mentions {
-        let end = start + len;
-        if len == 0 || end > units.len() {
-            continue;
-        }
-        let label: Vec<u16> = format!("@{}", name_of(aci)).encode_utf16().collect();
-        units.splice(start..end, label);
-    }
-    String::from_utf16_lossy(&units)
-}
-
-/// Whether the message @-mentions `aci`.
-pub fn mentions_account(content: &Content, aci: Uuid) -> bool {
-    mentioned_acis(content).contains(&aci)
-}
-
-/// Accounts mentioned in the message body.
-pub fn mentioned_acis(content: &Content) -> Vec<Uuid> {
-    text_message_of(content)
-        .map(|msg| mention_ranges(&msg.body_ranges).map(|(_, _, aci)| aci).collect())
-        .unwrap_or_default()
-}
-
 /// Names for the accounts mentioned in `content`, looked up in the contact store.
 pub async fn mention_names<S: Store>(
     manager: &Manager<S, Registered>,
@@ -971,64 +754,6 @@ pub async fn thread_title<S: Store>(manager: &Manager<S, Registered>, thread: &T
 
 pub fn name_or_uuid(names: &HashMap<Uuid, String>, uuid: Uuid) -> String {
     names.get(&uuid).cloned().unwrap_or_else(|| uuid.to_string())
-}
-
-/// Turn `@Name` tokens into Signal mentions. A token matching a known name becomes
-/// a U+FFFC placeholder plus a BodyRange carrying that account's ACI.
-pub fn encode_mentions(text: &str, names: &HashMap<Uuid, String>) -> (String, Vec<BodyRange>) {
-    // Longest name first so "Stefan Hagen" wins over "Stefan".
-    let mut known: Vec<(&str, Uuid)> = names
-        .iter()
-        .filter(|(_, name)| !name.is_empty())
-        .map(|(aci, name)| (name.as_str(), *aci))
-        .collect();
-    known.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(b.0)));
-
-    let mut body = String::with_capacity(text.len());
-    let mut utf16_len = 0usize;
-    let mut ranges = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find('@') {
-        let (plain, tail) = rest.split_at(at);
-        body.push_str(plain);
-        utf16_len += plain.encode_utf16().count();
-        let candidate = &tail[1..];
-        let matched = if at_word_boundary(&body) {
-            known
-                .iter()
-                .find(|(name, _)| candidate.starts_with(*name) && word_ends(&candidate[name.len()..]))
-        } else {
-            None
-        };
-        match matched {
-            Some((name, aci)) => {
-                ranges.push(BodyRange {
-                    start: Some(utf16_len as u32),
-                    length: Some(1),
-                    associated_value: Some(AssociatedValue::MentionAci(aci.to_string())),
-                });
-                body.push('\u{FFFC}');
-                utf16_len += 1;
-                rest = &candidate[name.len()..];
-            }
-            None => {
-                body.push('@');
-                utf16_len += 1;
-                rest = candidate;
-            }
-        }
-    }
-    body.push_str(rest);
-    (body, ranges)
-}
-
-/// True unless `before` ends inside a word, which would make the `@` part of an address.
-fn at_word_boundary(before: &str) -> bool {
-    before.chars().next_back().is_none_or(|c| !c.is_alphanumeric())
-}
-
-fn word_ends(after: &str) -> bool {
-    after.chars().next().is_none_or(|c| !c.is_alphanumeric())
 }
 
 /// The quote a reply to `content` carries: the original's timestamp, author,
@@ -1135,7 +860,7 @@ fn extract_edit(content: &Content) -> Option<(u64, DataMessage)> {
 
 /// The DataMessage whose text a content item carries: the message itself, or
 /// the replacement text of an edit.
-fn text_message_of(content: &Content) -> Option<&DataMessage> {
+pub(crate) fn text_message_of(content: &Content) -> Option<&DataMessage> {
     data_message_of(content).or_else(|| edit_of(content)?.data_message.as_ref())
 }
 
@@ -1619,123 +1344,6 @@ mod tests {
         Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()
     }
 
-    fn mention(start: u32, aci: Uuid) -> BodyRange {
-        BodyRange {
-            start: Some(start),
-            length: Some(1),
-            associated_value: Some(AssociatedValue::MentionAci(aci.to_string())),
-        }
-    }
-
-    fn names(uuid: Uuid) -> String {
-        if uuid == alice() {
-            "Alice".to_string()
-        } else if uuid == bob() {
-            "Bob".to_string()
-        } else {
-            uuid.to_string()
-        }
-    }
-
-    #[test]
-    fn substitutes_placeholder_with_name() {
-        let out = substitute_mentions("\u{FFFC} hi", &[mention(0, alice())], names);
-        assert_eq!(out, "@Alice hi");
-    }
-
-    #[test]
-    fn offsets_are_utf16_units() {
-        // 😀 is two UTF-16 code units, so the placeholder sits at index 3.
-        let out = substitute_mentions("😀 \u{FFFC}!", &[mention(3, alice())], names);
-        assert_eq!(out, "😀 @Alice!");
-    }
-
-    #[test]
-    fn multiple_mentions_in_any_order() {
-        let body = "\u{FFFC} and \u{FFFC}";
-        let ranges = [mention(0, alice()), mention(6, bob())];
-        assert_eq!(substitute_mentions(body, &ranges, names), "@Alice and @Bob");
-        let reversed = [mention(6, bob()), mention(0, alice())];
-        assert_eq!(substitute_mentions(body, &reversed, names), "@Alice and @Bob");
-    }
-
-    #[test]
-    fn out_of_range_mention_is_ignored() {
-        let out = substitute_mentions("x", &[mention(5, alice())], names);
-        assert_eq!(out, "x");
-    }
-
-    #[test]
-    fn binary_aci_is_accepted() {
-        let range = BodyRange {
-            start: Some(0),
-            length: Some(1),
-            associated_value: Some(AssociatedValue::MentionAciBinary(bob().as_bytes().to_vec())),
-        };
-        assert_eq!(substitute_mentions("\u{FFFC}", &[range], names), "@Bob");
-    }
-
-    fn roster() -> HashMap<Uuid, String> {
-        HashMap::from([(alice(), "Alice".to_string()), (bob(), "Bob Builder".to_string())])
-    }
-
-    fn aci_of(range: &BodyRange) -> Uuid {
-        match range.associated_value.as_ref().unwrap() {
-            AssociatedValue::MentionAci(s) => Uuid::parse_str(s).unwrap(),
-            other => panic!("unexpected value {other:?}"),
-        }
-    }
-
-    #[test]
-    fn encodes_known_name_as_placeholder_and_range() {
-        let (body, ranges) = encode_mentions("hi @Alice, ok?", &roster());
-        assert_eq!(body, "hi \u{FFFC}, ok?");
-        assert_eq!(ranges.len(), 1);
-        assert_eq!((ranges[0].start, ranges[0].length), (Some(3), Some(1)));
-        assert_eq!(aci_of(&ranges[0]), alice());
-    }
-
-    #[test]
-    fn encoded_offsets_count_utf16_units() {
-        let (body, ranges) = encode_mentions("😀 @Alice", &roster());
-        assert_eq!(body, "😀 \u{FFFC}");
-        assert_eq!(ranges[0].start, Some(3));
-    }
-
-    #[test]
-    fn names_with_spaces_match_whole() {
-        let (body, ranges) = encode_mentions("@Bob Builder and @Alice", &roster());
-        assert_eq!(body, "\u{FFFC} and \u{FFFC}");
-        assert_eq!(ranges.iter().map(aci_of).collect::<Vec<_>>(), vec![bob(), alice()]);
-        assert_eq!(ranges[1].start, Some(6));
-    }
-
-    #[test]
-    fn longer_name_wins_over_its_prefix() {
-        let names = HashMap::from([(alice(), "Stefan".to_string()), (bob(), "Stefan Hagen".to_string())]);
-        let (_, ranges) = encode_mentions("@Stefan Hagen hi", &names);
-        assert_eq!(aci_of(&ranges[0]), bob());
-        let (_, ranges) = encode_mentions("@Stefan hi", &names);
-        assert_eq!(aci_of(&ranges[0]), alice());
-    }
-
-    #[test]
-    fn partial_words_and_addresses_stay_text() {
-        for text in ["@Alicia", "@Alicex", "mail me@Alice.org", "@Nobody"] {
-            let (body, ranges) = encode_mentions(text, &roster());
-            assert_eq!(body, text);
-            assert!(ranges.is_empty());
-        }
-    }
-
-    #[test]
-    fn mentions_round_trip() {
-        let text = "ping @Alice and @Bob Builder 😀 @Alice";
-        let (body, ranges) = encode_mentions(text, &roster());
-        let shown = substitute_mentions(&body, &ranges, |u| name_or_uuid(&roster(), u));
-        assert_eq!(shown, text);
-    }
-
     #[test]
     fn new_reaction_replaces_the_reactors_previous_one() {
         let a = *alice().as_bytes();
@@ -1782,15 +1390,5 @@ mod tests {
         assert!(matches!(parse_thread_id(&"ab".repeat(32)), Ok(Thread::Group(_))));
         assert!(parse_thread_id("not-a-recipient").is_err());
         assert!(parse_thread_id(&"zz".repeat(32)).is_err());
-    }
-
-    #[test]
-    fn style_ranges_are_not_mentions() {
-        let range = BodyRange {
-            start: Some(0),
-            length: Some(4),
-            associated_value: Some(AssociatedValue::Style(1)),
-        };
-        assert_eq!(substitute_mentions("bold", &[range], names), "bold");
     }
 }
