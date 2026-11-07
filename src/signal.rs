@@ -635,11 +635,7 @@ fn is_member(group: &presage::model::groups::Group, aci: Uuid) -> bool {
 // master keys (32-byte blobs): a flat concatenation of fixed-size chunks.
 // The chunk size is compile-time via const generic N.
 fn load_chunks<const N: usize>(path: &Path) -> HashSet<[u8; N]> {
-    std::fs::read(path)
-        .unwrap_or_default()
-        .chunks_exact(N)
-        .filter_map(|c| c.try_into().ok())
-        .collect()
+    std::fs::read(path).unwrap_or_default().as_chunks::<N>().0.iter().copied().collect()
 }
 
 fn save_chunks<const N: usize>(path: &Path, items: &HashSet<[u8; N]>) -> std::io::Result<()> {
