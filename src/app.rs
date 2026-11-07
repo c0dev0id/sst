@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{Stream, StreamExt};
 use presage::Manager;
 use presage::manager::Registered;
@@ -267,22 +267,17 @@ impl App {
         }
     }
 
-    fn on_key_chat(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
+    fn on_key_chat(&mut self, key: KeyEvent) -> Option<AppCmd> {
         // Keys that need to set self.chat = None must fire before any borrow of self.chat.
-        if matches!(self.chat.as_ref()?.mode, Mode::Normal) {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
-                    self.chat = None;
-                    return Some(AppCmd::RefreshThreadList);
-                }
-                _ => {}
-            }
+        if matches!(self.chat.as_ref()?.mode, Mode::Normal)
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left)
+        {
+            self.chat = None;
+            return Some(AppCmd::RefreshThreadList);
         }
 
-        // Snapshot own_aci (Copy) before borrowing chat so Normal 'e' can check message ownership.
         let own_aci = self.own_aci;
         let chat = self.chat.as_mut()?;
-
         if chat.pending_d && (!matches!(chat.mode, Mode::Normal) || key.code != KeyCode::Char('d')) {
             chat.pending_d = false;
         }
@@ -290,15 +285,14 @@ impl App {
         // PgUp/PgDn scroll the message viewport in Normal and Insert modes;
         // Command mode ignores them so typing a command isn't interrupted.
         if !matches!(chat.mode, Mode::Command(_)) {
+            let page = chat.viewport_height as usize;
             match key.code {
                 KeyCode::PageUp => {
-                    let h = chat.viewport_height as usize;
-                    chat.scroll = chat.scroll.saturating_add(h);
+                    chat.scroll = chat.scroll.saturating_add(page);
                     return None;
                 }
                 KeyCode::PageDown => {
-                    let h = chat.viewport_height as usize;
-                    chat.scroll = chat.scroll.saturating_sub(h);
+                    chat.scroll = chat.scroll.saturating_sub(page);
                     return None;
                 }
                 _ => {}
@@ -306,233 +300,10 @@ impl App {
         }
 
         match chat.mode {
-            Mode::Normal => { // Normal mode
-                match key.code {
-                    KeyCode::Esc => {
-                        if chat.selected_message.is_some() || chat.selected_attachment.is_some() {
-                            chat.selected_message = None;
-                            chat.selected_attachment = None;
-                            chat.reply_to = None;
-                            chat.editing = None;
-                        }
-                    }
-                    KeyCode::Char('i') => {
-                        chat.mode = Mode::Insert;
-                    }
-                    KeyCode::Char(':') => {
-                        chat.mode = Mode::Command(String::new());
-                    }
-                    KeyCode::Char('r') => {
-                        if chat.selected_message.is_some() {
-                            chat.reply_to = chat.selected_message;
-                            chat.cursor = chat.input.len();
-                            chat.mode = Mode::Insert;
-                        } else {
-                            self.status = Some(HINT_SELECT_FIRST.to_string());
-                        }
-                    }
-                    KeyCode::Char('e') => match mutable_selection(chat, own_aci, "edit") {
-                        Err(why) => self.status = Some(why),
-                        Ok(content) => {
-                            let ts = content.timestamp();
-                            // Roster names only: a label like "Attachment" or "You" would be sent as text.
-                            let body = signal::message_text(content, |u| signal::name_or_uuid(&chat.sender_names, u));
-                            chat.input = body;
-                            chat.cursor = chat.input.len();
-                            chat.editing = Some(ts);
-                            chat.mode = Mode::Insert;
-                        }
-                    },
-                    KeyCode::Char('d') => {
-                        if let Some(att_idx) = chat.selected_attachment {
-                            if chat.pending_d {
-                                chat.pending_d = false;
-                                chat.staged_attachments.remove(att_idx);
-                                chat.selected_attachment = clamp_selection(att_idx, chat.staged_attachments.len());
-                            } else {
-                                chat.pending_d = true;
-                                self.status = Some("d again to remove attachment".to_string());
-                            }
-                        } else if let Err(why) = mutable_selection(chat, own_aci, "delete") {
-                            self.status = Some(why);
-                        } else if chat.pending_d {
-                            chat.pending_d = false;
-                            return Some(AppCmd::DeleteMessage);
-                        } else {
-                            chat.pending_d = true;
-                            self.status = Some("d again to delete for everyone".to_string());
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') if !chat.messages.is_empty() => {
-                        if let Some(i) = chat.selected_attachment {
-                            if i == 0 {
-                                chat.selected_attachment = None;
-                                chat.selected_message = Some(chat.messages.len() - 1);
-                            } else {
-                                chat.selected_attachment = Some(i - 1);
-                            }
-                        } else if let Some(s) = chat.selected_message {
-                            if s == 0 && !chat.staged_attachments.is_empty() {
-                                chat.selected_message = None;
-                                chat.selected_attachment = Some(chat.staged_attachments.len() - 1);
-                            } else {
-                                chat.selected_message = Some(s.saturating_sub(1));
-                            }
-                        } else {
-                            chat.selected_message = Some(chat.messages.len() - 1);
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') if !chat.messages.is_empty() => {
-                        if let Some(i) = chat.selected_attachment {
-                            let last = chat.staged_attachments.len().saturating_sub(1);
-                            if i >= last {
-                                chat.selected_attachment = None;
-                                chat.selected_message = Some(0);
-                            } else {
-                                chat.selected_attachment = Some(i + 1);
-                            }
-                        } else if let Some(sel) = chat.selected_message {
-                            let last_msg = chat.messages.len() - 1;
-                            if sel >= last_msg && !chat.staged_attachments.is_empty() {
-                                chat.selected_message = None;
-                                chat.selected_attachment = Some(0);
-                            } else {
-                                chat.selected_message = Some((sel + 1).min(last_msg));
-                            }
-                        } else {
-                            chat.selected_message = Some(chat.viewport_top_msg);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Mode::Insert => { // Insert mode
-                match key.code {
-                    KeyCode::Esc => {
-                        // Cancels a pending edit or reply, as the status bar says it does.
-                        if chat.editing.take().is_some() {
-                            chat.input.clear();
-                            chat.cursor = 0;
-                        }
-                        chat.reply_to = None;
-                        chat.mode = Mode::Normal;
-                    }
-                    KeyCode::Left => {
-                        chat.cursor = cursor_left(&chat.input, chat.cursor);
-                    }
-                    KeyCode::Right => {
-                        chat.cursor = cursor_right(&chat.input, chat.cursor);
-                    }
-                    KeyCode::Up => {
-                        chat.cursor = cursor_up(&chat.input, chat.cursor);
-                    }
-                    KeyCode::Down => {
-                        chat.cursor = cursor_down(&chat.input, chat.cursor);
-                    }
-                    // Shift+Enter or Alt+Enter → newline.
-                    // Shift+Enter is only distinguishable from Enter on terminals that
-                    // support modifyOtherKeys/kitty-protocol. Alt+Enter (ESC \r) is more
-                    // universally reported with ALT modifier and is the reliable alternative.
-                    KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
-                        chat.input.insert(chat.cursor, '\n');
-                        chat.cursor += 1;
-                    }
-                    KeyCode::Enter => {
-                        if !chat.input.trim().is_empty() || !chat.staged_attachments.is_empty() {
-                            return Some(AppCmd::SendMessage);
-                        }
-                    }
-                    // Ctrl+H is the terminal-conventional backspace (0x08). Some
-                    // terminal emulators (including OpenBSD's) send it for Shift+Backspace.
-                    KeyCode::Backspace | KeyCode::Char('h')
-                        if key.code == KeyCode::Backspace
-                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        if chat.cursor > 0 {
-                            let new_cursor = cursor_left(&chat.input, chat.cursor);
-                            chat.input.remove(new_cursor);
-                            chat.cursor = new_cursor;
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        chat.input.insert(chat.cursor, c);
-                        chat.cursor += c.len_utf8();
-                    }
-                    KeyCode::Tab => {
-                        if let Some(span) =
-                            completion_candidates(&chat.input, chat.cursor, &chat.sender_names)
-                        {
-                            if span.values.len() == 1 {
-                                let rep = span.values[0].clone();
-                                chat.input.replace_range(span.start..span.end, &rep);
-                                chat.cursor = span.start + rep.len();
-                                self.status = None;
-                            } else {
-                                let labels = span.display.as_deref().unwrap_or(&span.values);
-                                self.status = Some(labels.join("  "));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Mode::Command(_) => { // Command mode — clone command text before any mutation
-                let cmd_so_far = if let Mode::Command(s) = &chat.mode {
-                    s.clone()
-                } else {
-                    return None;
-                };
-                match key.code {
-                    KeyCode::Esc => {
-                        chat.mode = Mode::Normal;
-                    }
-                    KeyCode::Enter => {
-                        chat.mode = Mode::Normal;
-                        if !cmd_so_far.is_empty() {
-                            return Some(AppCmd::ExecCmd(cmd_so_far));
-                        }
-                    }
-                    KeyCode::Tab => {
-                        if let Some((name, arg)) = cmd_so_far.split_once(' ') {
-                            // Argument completion: dispatch on the registered ArgKind.
-                            self.status = match COLON_COMMANDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k) {
-                                Some(ArgKind::Path)  => apply_path_completion(name, arg, chat),
-                                Some(ArgKind::Emoji) => apply_emoji_completion(name, arg, chat),
-                                Some(ArgKind::None) | None => None,
-                            };
-                        } else {
-                            // Base-name completion: no argument typed yet.
-                            let partial = cmd_so_far.to_lowercase();
-                            let matches: Vec<&str> = COLON_COMMANDS
-                                .iter()
-                                .map(|(n, _)| *n)
-                                .filter(|c| c.starts_with(partial.as_str()))
-                                .collect();
-                            if matches.len() == 1 {
-                                chat.mode = Mode::Command(matches[0].to_string());
-                                self.status = None;
-                            } else if !matches.is_empty() {
-                                self.status = Some(
-                                    matches.iter().map(|c| format!(":{}", c)).collect::<Vec<_>>().join("  ")
-                                );
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        if let Mode::Command(s) = &mut chat.mode {
-                            s.pop();
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        if let Mode::Command(s) = &mut chat.mode {
-                            s.push(c);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            Mode::Normal => normal_mode_key(chat, &mut self.status, own_aci, key),
+            Mode::Insert => insert_mode_key(chat, &mut self.status, key),
+            Mode::Command(_) => command_mode_key(chat, &mut self.status, key),
         }
-        None
     }
 
     fn on_key_contacts(&mut self, key: crossterm::event::KeyEvent) -> Option<AppCmd> {
@@ -652,6 +423,232 @@ impl App {
 /// Selection index after a list shrank: the same position, or the new last item.
 fn clamp_selection(sel: usize, len: usize) -> Option<usize> {
     (len > 0).then(|| sel.min(len - 1))
+}
+
+// ── Chat window key handling by mode ─────────────────────────────────────────
+
+/// Normal mode: selection, reply, edit, delete and the mode switches.
+fn normal_mode_key(chat: &mut ChatState, status: &mut Option<String>, own_aci: Option<Uuid>, key: KeyEvent) -> Option<AppCmd> {
+    match key.code {
+        KeyCode::Esc => {
+            if chat.selected_message.is_some() || chat.selected_attachment.is_some() {
+                chat.selected_message = None;
+                chat.selected_attachment = None;
+                chat.reply_to = None;
+                chat.editing = None;
+            }
+        }
+        KeyCode::Char('i') => chat.mode = Mode::Insert,
+        KeyCode::Char(':') => chat.mode = Mode::Command(String::new()),
+        KeyCode::Char('r') => {
+            if chat.selected_message.is_some() {
+                chat.reply_to = chat.selected_message;
+                chat.cursor = chat.input.len();
+                chat.mode = Mode::Insert;
+            } else {
+                *status = Some(HINT_SELECT_FIRST.to_string());
+            }
+        }
+        KeyCode::Char('e') => match mutable_selection(chat, own_aci, "edit") {
+            Err(why) => *status = Some(why),
+            Ok(content) => {
+                let ts = content.timestamp();
+                // Roster names only: a label like "Attachment" or "You" would be sent as text.
+                let body = signal::message_text(content, |u| signal::name_or_uuid(&chat.sender_names, u));
+                chat.input = body;
+                chat.cursor = chat.input.len();
+                chat.editing = Some(ts);
+                chat.mode = Mode::Insert;
+            }
+        },
+        KeyCode::Char('d') => {
+            if let Some(att_idx) = chat.selected_attachment {
+                if chat.pending_d {
+                    chat.pending_d = false;
+                    chat.staged_attachments.remove(att_idx);
+                    chat.selected_attachment = clamp_selection(att_idx, chat.staged_attachments.len());
+                } else {
+                    chat.pending_d = true;
+                    *status = Some("d again to remove attachment".to_string());
+                }
+            } else if let Err(why) = mutable_selection(chat, own_aci, "delete") {
+                *status = Some(why);
+            } else if chat.pending_d {
+                chat.pending_d = false;
+                return Some(AppCmd::DeleteMessage);
+            } else {
+                chat.pending_d = true;
+                *status = Some("d again to delete for everyone".to_string());
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => select_previous(chat),
+        KeyCode::Down | KeyCode::Char('j') => select_next(chat),
+        _ => {}
+    }
+    None
+}
+
+// The selection ring: oldest message → newest → first staged file → last → oldest.
+
+fn select_previous(chat: &mut ChatState) {
+    if chat.messages.is_empty() {
+        return;
+    }
+    if let Some(i) = chat.selected_attachment {
+        if i == 0 {
+            chat.selected_attachment = None;
+            chat.selected_message = Some(chat.messages.len() - 1);
+        } else {
+            chat.selected_attachment = Some(i - 1);
+        }
+    } else if let Some(s) = chat.selected_message {
+        if s == 0 && !chat.staged_attachments.is_empty() {
+            chat.selected_message = None;
+            chat.selected_attachment = Some(chat.staged_attachments.len() - 1);
+        } else {
+            chat.selected_message = Some(s.saturating_sub(1));
+        }
+    } else {
+        chat.selected_message = Some(chat.messages.len() - 1);
+    }
+}
+
+fn select_next(chat: &mut ChatState) {
+    if chat.messages.is_empty() {
+        return;
+    }
+    if let Some(i) = chat.selected_attachment {
+        let last = chat.staged_attachments.len().saturating_sub(1);
+        if i >= last {
+            chat.selected_attachment = None;
+            chat.selected_message = Some(0);
+        } else {
+            chat.selected_attachment = Some(i + 1);
+        }
+    } else if let Some(sel) = chat.selected_message {
+        let last_msg = chat.messages.len() - 1;
+        if sel >= last_msg && !chat.staged_attachments.is_empty() {
+            chat.selected_message = None;
+            chat.selected_attachment = Some(0);
+        } else {
+            chat.selected_message = Some((sel + 1).min(last_msg));
+        }
+    } else {
+        chat.selected_message = Some(chat.viewport_top_msg);
+    }
+}
+
+/// Insert mode: editing the draft, Tab completion, Enter to send.
+fn insert_mode_key(chat: &mut ChatState, status: &mut Option<String>, key: KeyEvent) -> Option<AppCmd> {
+    match key.code {
+        KeyCode::Esc => {
+            // Cancels a pending edit or reply, as the status bar says it does.
+            if chat.editing.take().is_some() {
+                chat.input.clear();
+                chat.cursor = 0;
+            }
+            chat.reply_to = None;
+            chat.mode = Mode::Normal;
+        }
+        KeyCode::Left => chat.cursor = cursor_left(&chat.input, chat.cursor),
+        KeyCode::Right => chat.cursor = cursor_right(&chat.input, chat.cursor),
+        KeyCode::Up => chat.cursor = cursor_up(&chat.input, chat.cursor),
+        KeyCode::Down => chat.cursor = cursor_down(&chat.input, chat.cursor),
+        // Shift+Enter or Alt+Enter → newline.
+        // Shift+Enter is only distinguishable from Enter on terminals that
+        // support modifyOtherKeys/kitty-protocol. Alt+Enter (ESC \r) is more
+        // universally reported with ALT modifier and is the reliable alternative.
+        KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+            chat.input.insert(chat.cursor, '\n');
+            chat.cursor += 1;
+        }
+        KeyCode::Enter => {
+            if !chat.input.trim().is_empty() || !chat.staged_attachments.is_empty() {
+                return Some(AppCmd::SendMessage);
+            }
+        }
+        // Ctrl+H is the terminal-conventional backspace (0x08). Some
+        // terminal emulators (including OpenBSD's) send it for Shift+Backspace.
+        KeyCode::Backspace | KeyCode::Char('h')
+            if key.code == KeyCode::Backspace || key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            if chat.cursor > 0 {
+                let new_cursor = cursor_left(&chat.input, chat.cursor);
+                chat.input.remove(new_cursor);
+                chat.cursor = new_cursor;
+            }
+        }
+        KeyCode::Char(c) => {
+            chat.input.insert(chat.cursor, c);
+            chat.cursor += c.len_utf8();
+        }
+        KeyCode::Tab => {
+            if let Some(span) = completion_candidates(&chat.input, chat.cursor, &chat.sender_names) {
+                if span.values.len() == 1 {
+                    let rep = span.values[0].clone();
+                    chat.input.replace_range(span.start..span.end, &rep);
+                    chat.cursor = span.start + rep.len();
+                    *status = None;
+                } else {
+                    let labels = span.display.as_deref().unwrap_or(&span.values);
+                    *status = Some(labels.join("  "));
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Command mode: typing a colon command, with Tab completion of its name or argument.
+fn command_mode_key(chat: &mut ChatState, status: &mut Option<String>, key: KeyEvent) -> Option<AppCmd> {
+    let Mode::Command(typed) = &chat.mode else { return None };
+    let cmd_so_far = typed.clone();
+    match key.code {
+        KeyCode::Esc => chat.mode = Mode::Normal,
+        KeyCode::Enter => {
+            chat.mode = Mode::Normal;
+            if !cmd_so_far.is_empty() {
+                return Some(AppCmd::ExecCmd(cmd_so_far));
+            }
+        }
+        KeyCode::Tab => {
+            if let Some((name, arg)) = cmd_so_far.split_once(' ') {
+                // Argument completion: dispatch on the registered ArgKind.
+                *status = match COLON_COMMANDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k) {
+                    Some(ArgKind::Path) => apply_path_completion(name, arg, chat),
+                    Some(ArgKind::Emoji) => apply_emoji_completion(name, arg, chat),
+                    Some(ArgKind::None) | None => None,
+                };
+            } else {
+                // Base-name completion: no argument typed yet.
+                let partial = cmd_so_far.to_lowercase();
+                let matches: Vec<&str> = COLON_COMMANDS
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .filter(|c| c.starts_with(partial.as_str()))
+                    .collect();
+                if matches.len() == 1 {
+                    chat.mode = Mode::Command(matches[0].to_string());
+                    *status = None;
+                } else if !matches.is_empty() {
+                    *status = Some(matches.iter().map(|c| format!(":{}", c)).collect::<Vec<_>>().join("  "));
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Mode::Command(s) = &mut chat.mode {
+                s.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Mode::Command(s) = &mut chat.mode {
+                s.push(c);
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 // ── Colon command registry ────────────────────────────────────────────────────
@@ -1011,272 +1008,271 @@ async fn execute_cmd<S: Store>(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     match cmd {
-        AppCmd::OpenChat { thread, name } => {
-            let view = load_chat_view(manager, &thread).await?;
-            let sender_names = signal::load_sender_names(manager, &thread, app.own_aci, None).await;
-            app.mark_read(&thread);
-            app.open_chat(thread, name, view, sender_names);
-            ack_unseen(app, manager).await;
-        }
-        AppCmd::OpenContactBrowser => {
-            let (contacts, split) = signal::list_all_contacts(manager, app.own_aci).await?;
-            app.contacts = contacts;
-            app.contacts_split = split;
-            let mut state = ListState::default();
-            if !app.contacts.is_empty() {
-                state.select(Some(0));
-            }
-            app.contact_list_state = state;
-            app.view = View::ContactBrowser;
-        }
-        AppCmd::RefreshThreadList => {
-            let mut threads = signal::list_threads(manager, &app.data_dir, app.own_aci).await?;
-            // The store cannot know what the user has seen; keep this session's flags.
-            for entry in &mut threads {
-                entry.unread = app.threads.iter().any(|old| old.unread && old.thread == entry.thread);
-            }
-            app.threads = threads;
-            // Clamp selection so it stays valid after the list changes.
-            let new_len = app.threads.len();
-            match app.list_state.selected() {
-                Some(sel) if new_len > 0 => app.list_state.select(Some(sel.min(new_len - 1))),
-                None if new_len > 0 => app.list_state.select(Some(0)),
-                _ => {}
-            }
-            app.view = View::ChatList;
-        }
-        AppCmd::SendMessage => {
-            let chat = app.chat.as_mut().expect("SendMessage with no open chat");
-            let thread = chat.thread.clone();
+        AppCmd::OpenChat { thread, name } => open_chat_from_store(app, manager, thread, name).await,
+        AppCmd::OpenContactBrowser => open_contact_browser(app, manager).await,
+        AppCmd::RefreshThreadList => refresh_thread_list(app, manager).await,
+        AppCmd::SendMessage => send_draft(app, manager).await,
+        AppCmd::ExecCmd(text) => run_colon_command(app, manager, terminal, &text).await,
+        AppCmd::DeleteMessage => delete_selected(app, manager).await,
+    }
+}
 
-            // Upload before touching the draft, so a failed upload keeps the text,
-            // reply target and edit target for a retry; only the failed file is dropped.
-            let staged = if chat.editing.is_none() {
-                std::mem::take(&mut chat.staged_attachments)
-            } else {
-                Vec::new()
-            };
-            let pointers = if staged.is_empty() {
-                Vec::new()
-            } else {
-                match signal::upload_staged_attachments(manager, &staged).await {
-                    Ok(pts) => pts,
-                    Err((msg, failed_path)) => {
-                        chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
-                        chat.selected_attachment =
-                            chat.selected_attachment.and_then(|sel| clamp_selection(sel, chat.staged_attachments.len()));
-                        return Err(anyhow::anyhow!(msg));
-                    }
-                }
-            };
+async fn open_chat_from_store<S: Store>(
+    app: &mut App,
+    manager: &mut Manager<S, Registered>,
+    thread: Thread,
+    name: String,
+) -> anyhow::Result<()> {
+    let view = load_chat_view(manager, &thread).await?;
+    let sender_names = signal::load_sender_names(manager, &thread, app.own_aci, None).await;
+    app.mark_read(&thread);
+    app.open_chat(thread, name, view, sender_names);
+    ack_unseen(app, manager).await;
+    Ok(())
+}
 
-            let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_of);
-            let targeted = chat.editing.is_some() || quoted.is_some();
-            let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
-            if text.is_empty() && pointers.is_empty() {
-                return Ok(());
-            }
+async fn open_contact_browser<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
+    let (contacts, split) = signal::list_all_contacts(manager, app.own_aci).await?;
+    app.contacts = contacts;
+    app.contacts_split = split;
+    let mut state = ListState::default();
+    if !app.contacts.is_empty() {
+        state.select(Some(0));
+    }
+    app.contact_list_state = state;
+    app.view = View::ContactBrowser;
+    Ok(())
+}
 
-            let sent = if let Some(edit_ts) = chat.editing {
-                match chat.messages.iter().find(|m| m.timestamp() == edit_ts) {
-                    Some(original) => signal::send_edit(manager, &thread, original, text, body_ranges).await,
-                    None => Err(anyhow::anyhow!("the message being edited no longer exists")),
-                }
-            } else if let Some(quoted) = quoted {
-                signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await
-            } else {
-                signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await.map(|_| ())
-            };
-            match sent {
-                Ok(()) => {
-                    chat.input.clear();
-                    chat.cursor = 0;
-                    chat.reply_to = None;
-                    chat.editing = None;
-                    chat.selected_attachment = None;
-                    if targeted {
-                        chat.selected_message = None;
-                    }
-                    reload_chat(manager, &thread, &mut app.chat).await;
-                }
-                Err(e) => {
-                    // Keep the draft and put the files back so a retry re-uploads them.
-                    chat.staged_attachments = staged;
-                    return Err(e.context("send failed"));
-                }
-            }
-        }
-        AppCmd::ExecCmd(cmd_text) => {
-            let colon_input = format!(":{}", cmd_text);
-            let react_target = app.chat.as_ref().and_then(|c| {
-                let idx = c.selected_message?;
-                let msg = c.messages.get(idx)?;
-                Some((msg.timestamp(), msg.metadata.sender.raw_uuid()))
-            });
-            let thread = match app.chat.as_ref().map(|c| c.thread.clone()) {
-                Some(t) => t,
-                None => return Ok(()),
-            };
+async fn refresh_thread_list<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
+    let mut threads = signal::list_threads(manager, &app.data_dir, app.own_aci).await?;
+    // The store cannot know what the user has seen; keep this session's flags.
+    for entry in &mut threads {
+        entry.unread = app.threads.iter().any(|old| old.unread && old.thread == entry.thread);
+    }
+    app.threads = threads;
+    // Clamp selection so it stays valid after the list changes.
+    let new_len = app.threads.len();
+    match app.list_state.selected() {
+        Some(sel) if new_len > 0 => app.list_state.select(Some(sel.min(new_len - 1))),
+        None if new_len > 0 => app.list_state.select(Some(0)),
+        _ => {}
+    }
+    app.view = View::ChatList;
+    Ok(())
+}
 
-            match parse_colon_cmd(&colon_input) {
-                Some(ColonCmd::Quit) => {
-                    app.quit = true;
-                }
-                Some(ColonCmd::React("")) => {
-                    let hint = if let Some((target_ts, _)) = react_target {
-                        if let Some(chat) = &app.chat {
-                            reaction_hint(&chat.reactions, target_ts)
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        "no message selected".to_string()
-                    };
-                    app.status = Some(hint);
-                }
-                Some(ColonCmd::React(arg)) => {
-                    if let Some((target_ts, target_author)) = react_target {
-                        if let Some(emoji) = resolve_emoji(arg) {
-                            let remove = app.own_aci
-                                .and_then(|u| {
-                                    app.chat.as_ref()?.reactions.get(&target_ts)?.get(&emoji)
-                                        .map(|s| s.contains(u.as_bytes()))
-                                })
-                                .unwrap_or(false);
-                            signal::send_reaction(manager, &thread, emoji, target_ts, target_author, remove).await?;
-                            reload_chat(manager, &thread, &mut app.chat).await;
-                        } else {
-                            app.status = Some(format!("unknown emoji: {}", arg));
-                        }
-                    } else {
-                        app.status = Some("no message selected".to_string());
-                    }
-                }
-                Some(ColonCmd::Upload(path)) => {
-                    if path.is_empty() {
-                        app.status = Some(":upload <path>".to_string());
-                    } else {
-                        match signal::stage_attachment(std::path::Path::new(path)) {
-                            Ok(att) => {
-                                if let Some(chat) = &mut app.chat {
-                                    chat.staged_attachments.push(att);
-                                }
-                            }
-                            Err(msg) => {
-                                app.status = Some(msg);
-                            }
-                        }
-                    }
-                }
-                Some(ColonCmd::Download(path_arg)) => {
-                    let (thread_name, atts) = {
-                        let chat = match app.chat.as_ref() {
-                            Some(c) => c,
-                            None => return Ok(()),
-                        };
-                        let Some(idx) = chat.selected_message else {
-                            app.status = Some(HINT_SELECT_FIRST.to_string());
-                            return Ok(());
-                        };
-                        let atts = chat.messages.get(idx)
-                            .map(|m| signal::message_attachments(m).to_vec())
-                            .unwrap_or_default();
-                        (chat.thread_name.clone(), atts)
-                    };
-                    if atts.is_empty() {
-                        app.status = Some("no attachments on selected message".to_string());
-                        return Ok(());
-                    }
-                    let dir = resolve_download_dir(path_arg, &thread_name)?;
-                    std::fs::create_dir_all(&dir)
-                        .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
-                    let total = atts.len();
-                    for (i, pointer) in atts.iter().enumerate() {
-                        if total > 1 {
-                            app.status = Some(format!("downloading {}/{}…", i + 1, total));
-                            terminal.draw(|f| crate::ui::draw(f, app))?;
-                        }
-                        let filename = signal::attachment_filename(pointer, i);
-                        match signal::download_attachment(manager, pointer, &dir, &filename).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                app.status = Some(e);
-                                return Ok(());
-                            }
-                        }
-                    }
-                    app.status = Some(format!("saved {} file(s) to {}", total, dir.display()));
-                }
-                Some(ColonCmd::DownloadAll(path_arg)) => {
-                    let thread_name = match app.chat.as_ref() {
-                        Some(c) => c.thread_name.clone(),
-                        None => return Ok(()),
-                    };
-                    // Collect all (filename, pointer, msg_num) — msg_num counts only msgs with attachments.
-                    let mut downloads: Vec<(String, AttachmentPointer, usize)> = Vec::new();
-                    let mut msg_with_atts = 0usize;
-                    let mut global_idx = 0usize;
-                    if let Some(chat) = app.chat.as_ref() {
-                        for msg in &chat.messages {
-                            let atts = signal::message_attachments(msg);
-                            if atts.is_empty() { continue; }
-                            msg_with_atts += 1;
-                            for pointer in atts {
-                                downloads.push((
-                                    signal::attachment_filename(pointer, global_idx),
-                                    pointer.clone(),
-                                    msg_with_atts,
-                                ));
-                                global_idx += 1;
-                            }
-                        }
-                    }
-                    if downloads.is_empty() {
-                        app.status = Some("no attachments in this chat".to_string());
-                        return Ok(());
-                    }
-                    let total_files = downloads.len();
-                    let total_msgs = msg_with_atts;
-                    let dir = resolve_download_dir(path_arg, &thread_name)?;
-                    std::fs::create_dir_all(&dir)
-                        .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
-                    for (i, (filename, pointer, msg_num)) in downloads.iter().enumerate() {
-                        app.status = Some(format!(
-                                "downloading {}/{} (message {}/{})…",
-                                i + 1, total_files, msg_num, total_msgs
-                            ));
-                        terminal.draw(|f| crate::ui::draw(f, app))?;
-                        match signal::download_attachment(manager, pointer, &dir, filename).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                app.status = Some(format!("file {}: {}", i + 1, e));
-                                return Ok(());
-                            }
-                        }
-                    }
-                    app.status = Some(format!(
-                            "saved {} file(s) to {}",
-                            total_files, dir.display()
-                        ));
-                }
-                None => {
-                    app.status = Some(format!("unknown command: :{}", cmd_text));
-                }
+/// Send the draft as a new message, a reply or an edit, with the staged files.
+async fn send_draft<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
+    let chat = app.chat.as_mut().expect("SendMessage with no open chat");
+    let thread = chat.thread.clone();
+
+    // Upload before touching the draft, so a failed upload keeps the text,
+    // reply target and edit target for a retry; only the failed file is dropped.
+    let staged = if chat.editing.is_none() {
+        std::mem::take(&mut chat.staged_attachments)
+    } else {
+        Vec::new()
+    };
+    let pointers = if staged.is_empty() {
+        Vec::new()
+    } else {
+        match signal::upload_staged_attachments(manager, &staged).await {
+            Ok(pts) => pts,
+            Err((msg, failed_path)) => {
+                chat.staged_attachments = staged.into_iter().filter(|a| a.path != failed_path).collect();
+                chat.selected_attachment =
+                    chat.selected_attachment.and_then(|sel| clamp_selection(sel, chat.staged_attachments.len()));
+                return Err(anyhow::anyhow!(msg));
             }
         }
-        AppCmd::DeleteMessage => {
-            // Ownership and age were checked when the second d was pressed.
-            let Some(chat) = app.chat.as_ref() else { return Ok(()) };
-            let Some(sel_idx) = chat.selected_message else { return Ok(()) };
-            let Some(timestamp) = chat.messages.get(sel_idx).map(|m| m.timestamp()) else { return Ok(()) };
-            let thread = chat.thread.clone();
-            signal::delete_for_everyone(manager, &thread, timestamp).await?;
-            // The store row is gone; the reload drops the message, and with it the selection.
+    };
+
+    let quoted = chat.reply_to.and_then(|idx| chat.messages.get(idx)).map(signal::quote_of);
+    let targeted = chat.editing.is_some() || quoted.is_some();
+    let (text, body_ranges) = signal::encode_mentions(chat.input.trim(), &chat.sender_names);
+    if text.is_empty() && pointers.is_empty() {
+        return Ok(());
+    }
+
+    let sent = if let Some(edit_ts) = chat.editing {
+        match chat.messages.iter().find(|m| m.timestamp() == edit_ts) {
+            Some(original) => signal::send_edit(manager, &thread, original, text, body_ranges).await,
+            None => Err(anyhow::anyhow!("the message being edited no longer exists")),
+        }
+    } else if let Some(quoted) = quoted {
+        signal::send_reply(manager, &thread, text, body_ranges, quoted, pointers).await
+    } else {
+        signal::send_to_thread(manager, &thread, text, body_ranges, pointers).await.map(|_| ())
+    };
+    match sent {
+        Ok(()) => {
+            chat.input.clear();
+            chat.cursor = 0;
+            chat.reply_to = None;
+            chat.editing = None;
+            chat.selected_attachment = None;
+            if targeted {
+                chat.selected_message = None;
+            }
             reload_chat(manager, &thread, &mut app.chat).await;
+            Ok(())
+        }
+        Err(e) => {
+            // Keep the draft and put the files back so a retry re-uploads them.
+            chat.staged_attachments = staged;
+            Err(e.context("send failed"))
+        }
+    }
+}
+
+async fn run_colon_command<S: Store>(
+    app: &mut App,
+    manager: &mut Manager<S, Registered>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    text: &str,
+) -> anyhow::Result<()> {
+    let Some(thread) = app.chat.as_ref().map(|c| c.thread.clone()) else { return Ok(()) };
+    match parse_colon_cmd(&format!(":{text}")) {
+        Some(ColonCmd::Quit) => app.quit = true,
+        Some(ColonCmd::React(arg)) => react(app, manager, &thread, arg).await?,
+        Some(ColonCmd::Upload(path)) => stage_upload(app, path),
+        Some(ColonCmd::Download(dir)) => download(app, manager, terminal, dir, DownloadScope::Selected).await?,
+        Some(ColonCmd::DownloadAll(dir)) => download(app, manager, terminal, dir, DownloadScope::All).await?,
+        None => app.status = Some(format!("unknown command: :{text}")),
+    }
+    Ok(())
+}
+
+/// `:react` with no argument shows the selected message's reactions; with an
+/// emoji or shortcode it toggles that reaction.
+async fn react<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>, thread: &Thread, arg: &str) -> anyhow::Result<()> {
+    let target = app.chat.as_ref().and_then(|c| {
+        let msg = c.messages.get(c.selected_message?)?;
+        Some((msg.timestamp(), msg.metadata.sender.raw_uuid()))
+    });
+    let Some((target_ts, target_author)) = target else {
+        app.status = Some("no message selected".to_string());
+        return Ok(());
+    };
+    if arg.is_empty() {
+        if let Some(chat) = &app.chat {
+            app.status = Some(reaction_hint(&chat.reactions, target_ts));
+        }
+        return Ok(());
+    }
+    let Some(emoji) = resolve_emoji(arg) else {
+        app.status = Some(format!("unknown emoji: {arg}"));
+        return Ok(());
+    };
+    let already_mine = app.own_aci.zip(app.chat.as_ref()).is_some_and(|(me, chat)| {
+        chat.reactions
+            .get(&target_ts)
+            .and_then(|per_emoji| per_emoji.get(&emoji))
+            .is_some_and(|reactors| reactors.contains(me.as_bytes()))
+    });
+    signal::send_reaction(manager, thread, emoji, target_ts, target_author, already_mine).await?;
+    reload_chat(manager, thread, &mut app.chat).await;
+    Ok(())
+}
+
+fn stage_upload(app: &mut App, path: &str) {
+    if path.is_empty() {
+        app.status = Some(":upload <path>".to_string());
+        return;
+    }
+    match signal::stage_attachment(std::path::Path::new(path)) {
+        Ok(att) => {
             if let Some(chat) = &mut app.chat {
-                chat.selected_message = clamp_selection(sel_idx, chat.messages.len());
+                chat.staged_attachments.push(att);
             }
         }
+        Err(msg) => app.status = Some(msg),
+    }
+}
+
+enum DownloadScope {
+    Selected,
+    All,
+}
+
+/// Download the selected message's attachments or every attachment in the
+/// chat into `dir_arg` (default: ~/Downloads/sst/<chat>), drawing progress
+/// between files.
+async fn download<S: Store>(
+    app: &mut App,
+    manager: &mut Manager<S, Registered>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    dir_arg: &str,
+    scope: DownloadScope,
+) -> anyhow::Result<()> {
+    let Some(chat) = app.chat.as_ref() else { return Ok(()) };
+    let thread_name = chat.thread_name.clone();
+    // (filename, pointer, progress label)
+    let queue: Vec<(String, AttachmentPointer, String)> = match scope {
+        DownloadScope::Selected => {
+            let Some(idx) = chat.selected_message else {
+                app.status = Some(HINT_SELECT_FIRST.to_string());
+                return Ok(());
+            };
+            let attachments = chat.messages.get(idx).map(signal::message_attachments).unwrap_or(&[]);
+            attachments
+                .iter()
+                .enumerate()
+                .map(|(i, pointer)| (signal::attachment_filename(pointer, i), pointer.clone(), String::new()))
+                .collect()
+        }
+        DownloadScope::All => {
+            let with_attachments: Vec<&Content> =
+                chat.messages.iter().filter(|m| !signal::message_attachments(m).is_empty()).collect();
+            let mut queue = Vec::new();
+            for (n, msg) in with_attachments.iter().enumerate() {
+                for pointer in signal::message_attachments(msg) {
+                    let label = format!(" (message {}/{})", n + 1, with_attachments.len());
+                    queue.push((signal::attachment_filename(pointer, queue.len()), pointer.clone(), label));
+                }
+            }
+            queue
+        }
+    };
+    if queue.is_empty() {
+        app.status = Some(
+            match scope {
+                DownloadScope::Selected => "no attachments on selected message",
+                DownloadScope::All => "no attachments in this chat",
+            }
+            .to_string(),
+        );
+        return Ok(());
+    }
+
+    let dir = resolve_download_dir(dir_arg, &thread_name)?;
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
+    let total = queue.len();
+    for (i, (filename, pointer, label)) in queue.iter().enumerate() {
+        if total > 1 {
+            app.status = Some(format!("downloading {}/{}{}…", i + 1, total, label));
+            terminal.draw(|f| crate::ui::draw(f, app))?;
+        }
+        signal::download_attachment(manager, pointer, &dir, filename)
+            .await
+            .map_err(|e| anyhow::anyhow!("file {}: {e}", i + 1))?;
+    }
+    app.status = Some(format!("saved {total} file(s) to {}", dir.display()));
+    Ok(())
+}
+
+async fn delete_selected<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
+    // Ownership and age were checked when the second d was pressed.
+    let Some(chat) = app.chat.as_ref() else { return Ok(()) };
+    let Some(sel_idx) = chat.selected_message else { return Ok(()) };
+    let Some(timestamp) = chat.messages.get(sel_idx).map(|m| m.timestamp()) else { return Ok(()) };
+    let thread = chat.thread.clone();
+    signal::delete_for_everyone(manager, &thread, timestamp).await?;
+    // The store row is gone; the reload drops the message, and with it the selection.
+    reload_chat(manager, &thread, &mut app.chat).await;
+    if let Some(chat) = &mut app.chat {
+        chat.selected_message = clamp_selection(sel_idx, chat.messages.len());
     }
     Ok(())
 }
