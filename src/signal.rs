@@ -12,7 +12,7 @@ use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
-use presage::libsignal_service::prelude::Uuid;
+use presage::libsignal_service::prelude::{ProfileKey, Uuid};
 use presage::libsignal_service::protocol::ServiceId;
 use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::{self, Sent}};
 
@@ -791,40 +791,44 @@ pub async fn lookup_contact_name<S: Store>(
     contact_display_name(manager, &contact).await
 }
 
-/// Names of a thread's participants other than `own_aci`, keyed by ACI, for
-/// sender labels, mention rendering and @completion. Group members missing from
-/// the contact store get a profile fetch with the roster's profile key (presage
-/// caches the result); `wanted` restricts a group to the given members.
-/// Members that cannot be resolved are left out, so callers fall back to the UUID.
-pub async fn load_sender_names<S: Store>(
-    manager: &mut Manager<S, Registered>,
+/// Names of a thread's participants other than `own_aci` that the store can
+/// give without a network round trip: contacts and cached profiles, keyed by
+/// ACI, for sender labels, mention rendering and @completion. Group members it
+/// cannot name come back with their roster profile key for fetch_member_name.
+/// `wanted` restricts a group to the given members.
+pub async fn roster_names<S: Store>(
+    manager: &Manager<S, Registered>,
     thread: &Thread,
     own_aci: Option<Uuid>,
     wanted: Option<&HashSet<Uuid>>,
-) -> HashMap<Uuid, String> {
-    let mut map: HashMap<Uuid, String> = HashMap::new();
+) -> (HashMap<Uuid, String>, Vec<(Uuid, ProfileKey)>) {
+    let mut names: HashMap<Uuid, String> = HashMap::new();
+    let mut missing: Vec<(Uuid, ProfileKey)> = Vec::new();
     match thread {
         Thread::Group(key) => {
             let Ok(Some(group)) = manager.store().group(*key).await else {
-                return map;
+                return (names, missing);
             };
             for member in group.members {
                 let uuid = ServiceId::Aci(member.aci).raw_uuid();
                 if own_aci == Some(uuid) || wanted.is_some_and(|w| !w.contains(&uuid)) {
                     continue;
                 }
-                let name = match lookup_contact_name(manager, uuid).await {
+                let cached = match lookup_contact_name(manager, uuid).await {
                     Some(name) => Some(name),
-                    None => match manager.retrieve_profile_by_uuid(uuid, member.profile_key).await {
-                        Ok(profile) => profile_display_name(profile.name),
-                        Err(e) => {
-                            tracing::warn!("profile fetch failed for {uuid}: {e}");
-                            None
-                        }
-                    },
+                    None => manager
+                        .store()
+                        .profile(uuid, member.profile_key)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|profile| profile_display_name(profile.name)),
                 };
-                if let Some(name) = name {
-                    map.insert(uuid, name);
+                match cached {
+                    Some(name) => {
+                        names.insert(uuid, name);
+                    }
+                    None => missing.push((uuid, member.profile_key)),
                 }
             }
         }
@@ -833,11 +837,43 @@ pub async fn load_sender_names<S: Store>(
             if own_aci != Some(uuid)
                 && let Some(name) = lookup_contact_name(manager, uuid).await
             {
-                map.insert(uuid, name);
+                names.insert(uuid, name);
             }
         }
     }
-    map
+    (names, missing)
+}
+
+/// Fetch the profile of a group member the store could not name; presage caches it.
+pub async fn fetch_member_name<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    uuid: Uuid,
+    profile_key: ProfileKey,
+) -> Option<String> {
+    match manager.retrieve_profile_by_uuid(uuid, profile_key).await {
+        Ok(profile) => profile_display_name(profile.name),
+        Err(e) => {
+            tracing::warn!("profile fetch failed for {uuid}: {e}");
+            None
+        }
+    }
+}
+
+/// roster_names plus a fetch for every member it could not name. Members that
+/// still cannot be resolved are left out, so callers fall back to the UUID.
+pub async fn load_sender_names<S: Store>(
+    manager: &mut Manager<S, Registered>,
+    thread: &Thread,
+    own_aci: Option<Uuid>,
+    wanted: Option<&HashSet<Uuid>>,
+) -> HashMap<Uuid, String> {
+    let (mut names, missing) = roster_names(manager, thread, own_aci, wanted).await;
+    for (uuid, profile_key) in missing {
+        if let Some(name) = fetch_member_name(manager, uuid, profile_key).await {
+            names.insert(uuid, name);
+        }
+    }
+    names
 }
 
 /// The edit carried by incoming content or by a sync of our own edit.

@@ -1010,7 +1010,7 @@ async fn execute_cmd<S: Store>(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     match cmd {
-        AppCmd::OpenChat { thread, name } => open_chat_from_store(app, manager, thread, name).await,
+        AppCmd::OpenChat { thread, name } => open_chat_from_store(app, manager, terminal, thread, name).await,
         AppCmd::OpenContactBrowser => open_contact_browser(app, manager).await,
         AppCmd::RefreshThreadList => refresh_thread_list(app, manager).await,
         AppCmd::SendMessage => send_draft(app, manager).await,
@@ -1019,17 +1019,28 @@ async fn execute_cmd<S: Store>(
     }
 }
 
+/// Open a chat with the names the store has, then fetch the missing member
+/// profiles one at a time with a redraw between them, so the chat is usable at once.
 async fn open_chat_from_store<S: Store>(
     app: &mut App,
     manager: &mut Manager<S, Registered>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     thread: Thread,
     name: String,
 ) -> anyhow::Result<()> {
     let view = load_chat_view(manager, &thread).await?;
-    let sender_names = signal::load_sender_names(manager, &thread, app.own_aci, None).await;
+    let (sender_names, mut unnamed) = signal::roster_names(manager, &thread, app.own_aci, None).await;
     app.mark_read(&thread);
     app.open_chat(thread, name, view, sender_names);
     ack_unseen(app, manager).await;
+    while let Some((uuid, profile_key)) = unnamed.pop() {
+        terminal.draw(|f| crate::ui::draw(f, app))?;
+        if let Some(name) = signal::fetch_member_name(manager, uuid, profile_key).await
+            && let Some(chat) = &mut app.chat
+        {
+            chat.sender_names.insert(uuid, name);
+        }
+    }
     Ok(())
 }
 
