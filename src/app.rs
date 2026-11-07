@@ -1376,3 +1376,132 @@ pub async fn run<S: Store>(
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn me() -> Uuid {
+        Uuid::parse_str("99999999-9999-9999-9999-999999999999").unwrap()
+    }
+
+    fn other() -> Uuid {
+        Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()
+    }
+
+    fn thread(id: &str) -> Thread {
+        signal::parse_thread_id(id).unwrap()
+    }
+
+    #[test]
+    fn cursor_moves_by_character_not_byte() {
+        let s = "aé😀b";
+        assert_eq!(cursor_right(s, 0), 1);
+        assert_eq!(cursor_right(s, 1), 3);
+        assert_eq!(cursor_right(s, 3), 7);
+        assert_eq!(cursor_right(s, 8), 8);
+        assert_eq!(cursor_left(s, 7), 3);
+        assert_eq!(cursor_left(s, 3), 1);
+        assert_eq!(cursor_left(s, 0), 0);
+    }
+
+    #[test]
+    fn cursor_up_and_down_keep_the_column_where_the_line_allows() {
+        let s = "hello\nhi\nworld";
+        assert_eq!(cursor_line_col(s, 4), (0, 4));
+        assert_eq!(cursor_down(s, 4), 8);
+        assert_eq!(cursor_line_col(s, 8), (1, 2));
+        assert_eq!(cursor_down(s, 8), 11);
+        assert_eq!(cursor_down(s, 11), 11);
+        assert_eq!(cursor_up(s, 11), 8);
+        assert_eq!(cursor_up(s, 8), 2);
+        assert_eq!(cursor_up(s, 2), 2);
+    }
+
+    #[test]
+    fn completion_offers_roster_names_matching_the_partial() {
+        let names = HashMap::from([(me(), "Alice".to_string()), (other(), "Albert".to_string())]);
+        let input = "hi @al";
+        let span = completion_candidates(input, input.len(), &names).unwrap();
+        assert_eq!((span.start, span.end), (3, 6));
+        assert_eq!(span.values, vec!["@Albert ".to_string(), "@Alice ".to_string()]);
+        assert!(completion_candidates("hi @zed", 7, &names).is_none());
+        assert!(completion_candidates("@Alice is here", 14, &names).is_none());
+    }
+
+    #[test]
+    fn colon_commands_parse_with_an_optional_argument() {
+        assert!(matches!(parse_colon_cmd(":quit"), Some(ColonCmd::Quit)));
+        assert!(matches!(parse_colon_cmd(":react wave"), Some(ColonCmd::React("wave"))));
+        assert!(matches!(parse_colon_cmd(":react"), Some(ColonCmd::React(""))));
+        assert!(matches!(parse_colon_cmd(":upload /tmp/x.png"), Some(ColonCmd::Upload("/tmp/x.png"))));
+        assert!(matches!(parse_colon_cmd(":download-all"), Some(ColonCmd::DownloadAll(""))));
+        assert!(parse_colon_cmd(":nope").is_none());
+        assert!(parse_colon_cmd("quit").is_none());
+    }
+
+    #[test]
+    fn emoji_resolves_shortcodes_and_passes_raw_emoji_through() {
+        assert_eq!(resolve_emoji("wave").as_deref(), Some("👋"));
+        assert_eq!(resolve_emoji("❤️").as_deref(), Some("❤️"));
+        assert!(resolve_emoji("not-a-shortcode").is_none());
+        assert!(resolve_emoji("  ").is_none());
+    }
+
+    #[test]
+    fn selection_clamps_after_a_removal() {
+        assert_eq!(clamp_selection(3, 5), Some(3));
+        assert_eq!(clamp_selection(4, 4), Some(3));
+        assert_eq!(clamp_selection(0, 0), None);
+    }
+
+    fn update(thread: &Thread, sender: Uuid, ts: u64, edit_of: Option<u64>) -> MessageUpdate {
+        MessageUpdate { thread: thread.clone(), sender, preview: format!("m{ts}"), ts, edit_of }
+    }
+
+    #[test]
+    fn live_messages_reorder_the_list_and_mark_unread() {
+        let a = thread("11111111-1111-1111-1111-111111111111");
+        let b = thread("22222222-2222-2222-2222-222222222222");
+        let mut app = App::new(
+            vec![
+                ThreadEntry::new(a.clone(), "A".to_string(), Some("old".to_string()), 100),
+                ThreadEntry::new(b.clone(), "B".to_string(), None, 50),
+            ],
+            Some(me()),
+            PathBuf::from("/nonexistent"),
+        );
+
+        // A newer message from someone else moves the thread up and marks it unread.
+        assert!(app.apply_update(update(&b, other(), 200, None)).is_none());
+        assert_eq!(app.threads[0].name, "B");
+        assert!(app.threads[0].unread);
+        assert_eq!(app.threads[0].last_preview.as_deref(), Some("m200"));
+
+        // An own message updates the preview without marking unread.
+        app.apply_update(update(&a, me(), 300, None));
+        assert_eq!(app.threads[0].name, "A");
+        assert!(!app.threads[0].unread);
+
+        // An older message arriving late does not replace the preview.
+        app.apply_update(update(&a, other(), 250, None));
+        assert_eq!(app.threads[0].last_preview.as_deref(), Some("m300"));
+
+        // An edit of the newest message changes the preview only; of an older one, nothing.
+        app.apply_update(MessageUpdate { thread: a.clone(), sender: other(), preview: "edited".to_string(), ts: 400, edit_of: Some(300) });
+        assert_eq!(app.threads[0].last_preview.as_deref(), Some("edited"));
+        assert_eq!(app.threads[0].last_ts, 300);
+        app.apply_update(MessageUpdate { thread: a.clone(), sender: other(), preview: "stale".to_string(), ts: 401, edit_of: Some(100) });
+        assert_eq!(app.threads[0].last_preview.as_deref(), Some("edited"));
+
+        // An unknown thread comes back to be added by name; an edit for one does not.
+        let c = thread("33333333-3333-3333-3333-333333333333");
+        assert!(app.apply_update(update(&c, other(), 500, Some(1))).is_none());
+        let pending = app.apply_update(update(&c, other(), 500, None)).unwrap();
+        app.add_thread(pending, "C".to_string());
+        assert_eq!(app.threads[0].name, "C");
+        assert!(app.threads[0].unread);
+        app.mark_read(&c);
+        assert!(!app.threads[0].unread);
+    }
+}

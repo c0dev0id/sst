@@ -633,3 +633,24 @@ fn format_reactions(map: Option<&HashMap<String, HashSet<[u8; 16]>>>) -> Option<
     let map = map.filter(|m| !m.is_empty())?;
     Some(format!("[{}]", signal::fmt_reaction_pairs(map).join(", ")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{word_wrap, wrap_input_line};
+
+    #[test]
+    fn word_wrap_breaks_at_spaces_and_keeps_newlines() {
+        assert_eq!(word_wrap("hello world foo", 11), vec!["hello world", "foo"]);
+        assert_eq!(word_wrap("a\nb", 10), vec!["a", "b"]);
+        assert_eq!(word_wrap("supercalifragilistic", 5), vec!["supercalifragilistic"]);
+        assert_eq!(word_wrap("", 5), vec![""]);
+        assert_eq!(word_wrap("x y", 0), vec!["x y"]);
+    }
+
+    #[test]
+    fn input_wrap_keeps_character_offsets_for_the_cursor() {
+        assert_eq!(wrap_input_line("hello world foo", 11), vec![("hello ".to_string(), 0), ("world foo".to_string(), 6)]);
+        assert_eq!(wrap_input_line("abcdefghij", 4), vec![("abcd".to_string(), 0), ("efgh".to_string(), 4), ("ij".to_string(), 8)]);
+        assert_eq!(wrap_input_line("short", 10), vec![("short".to_string(), 0)]);
+    }
+}
