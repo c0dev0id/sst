@@ -14,7 +14,7 @@ use presage::store::{ContentExt, Store, Thread};
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::prelude::{ProfileKey, Uuid};
 use presage::libsignal_service::protocol::ServiceId;
-use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::{self, Sent}};
+use presage::libsignal_service::proto::{AttachmentPointer, BodyRange, DataMessage, EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, data_message, data_message::quote::QuotedAttachment, receipt_message, sync_message::{self, Content as SyncContent, Sent}};
 
 use crate::attachments::{stage_attachment, upload_staged_attachments};
 use crate::mentions::{encode_mentions, mention_ranges, mentioned_acis, mentions_account, substitute_mentions};
@@ -224,6 +224,9 @@ async fn drain_backlog<S: Store>(
                 }
             }
             Received::Contacts => tracing::info!("contact list synced"),
+            Received::DecryptionError(sender) => {
+                tracing::warn!("could not decrypt a message from {}", sender.service_id_string())
+            }
         }
     }
 
@@ -278,7 +281,7 @@ pub async fn sync_contacts<S: Store>(manager: &mut Manager<S, Registered>) -> an
         match stream.next().await {
             Some(Received::QueueEmpty) => break,
             Some(Received::Contacts) => return Ok(()),
-            Some(Received::Content(_)) => {}
+            Some(Received::Content(_) | Received::DecryptionError(_)) => {}
             None => anyhow::bail!("receive stream closed before the message queue was drained"),
         }
     }
@@ -688,7 +691,7 @@ pub(crate) fn data_message_of(content: &Content) -> Option<&DataMessage> {
     match &content.body {
         ContentBody::DataMessage(msg) => Some(msg),
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { message: Some(msg), .. }),
+            content: Some(SyncContent::Sent(Sent { message: Some(msg), .. })),
             ..
         }) => Some(msg),
         _ => None,
@@ -699,7 +702,7 @@ fn data_message_of_mut(content: &mut Content) -> Option<&mut DataMessage> {
     match &mut content.body {
         ContentBody::DataMessage(msg) => Some(msg),
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { message: Some(msg), .. }),
+            content: Some(SyncContent::Sent(Sent { message: Some(msg), .. })),
             ..
         }) => Some(msg),
         _ => None,
@@ -722,9 +725,6 @@ impl<'a> Shown<'a> {
                 Some(secs) if secs > 0 => format!("Disappearing message timer set to {}", fmt_duration(secs)).into(),
                 _ => "Disappearing messages turned off".into(),
             });
-        }
-        if flags & data_message::Flags::EndSession as u32 != 0 {
-            return Shown::Label("Session reset".into());
         }
         let label = match msg.body.as_deref() {
             Some(text) if !text.is_empty() => return Shown::Text(text, &msg.body_ranges),
@@ -962,7 +962,7 @@ fn edit_of(content: &Content) -> Option<&EditMessage> {
     match &content.body {
         ContentBody::EditMessage(edit) => Some(edit),
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(Sent { edit_message: Some(edit), .. }),
+            content: Some(SyncContent::Sent(Sent { edit_message: Some(edit), .. })),
             ..
         }) => Some(edit),
         _ => None,

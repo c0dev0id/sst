@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Contact browser (`n` from chat list): shows all synced contacts and known groups regardless of message history; contacts first (alphabetical) then groups separated by a `── groups ──` divider. Allows opening any thread, including ones with no prior messages.
 
 ### Changed
+- Updated the Signal library (presage) to its October 2026 revision. Messages that cannot be decrypted are logged and skipped instead of ending the session. The retired "Session reset" label is gone.
 - Returning to the chat list is instant: only the chat just left is re-read instead of every thread.
 - Opening a group no longer waits for the profiles of members outside your contacts; the chat appears at once and their names fill in.
 - `sst chats` and `sst contacts` work beside a running TUI or `sst watch`: they read the local store instead of failing on the instance lock, and sync first only when nothing else is running.
