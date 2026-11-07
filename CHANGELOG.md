@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Returning to the chat list is instant: only the chat just left is re-read instead of every thread.
 - Opening a group no longer waits for the profiles of members outside your contacts; the chat appears at once and their names fill in.
 - `sst chats` and `sst contacts` work beside a running TUI or `sst watch`: they read the local store instead of failing on the instance lock, and sync first only when nothing else is running.
 - `print` and `print-last` sync with Signal only when no other sst instance is running; beside the TUI or `sst watch` they read the local store, which that instance keeps current. Previously two processes consumed the same device queue.

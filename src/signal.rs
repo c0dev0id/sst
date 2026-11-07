@@ -582,7 +582,7 @@ fn save_chunks<const N: usize>(path: &Path, items: &HashSet<[u8; N]>) -> std::io
 /// rows cannot reorder the chat list. The store yields newest first, so an edit
 /// is seen before its target and replaces the target's text. A thread whose
 /// newest rows are all bookkeeping is treated as empty after a bounded scan.
-async fn last_message<S: Store>(
+pub async fn last_message<S: Store>(
     manager: &Manager<S, Registered>,
     thread: &Thread,
 ) -> (Option<String>, u64) {

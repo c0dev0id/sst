@@ -121,7 +121,8 @@ impl ChatState {
 pub enum AppCmd {
     OpenChat { thread: Thread, name: String },
     OpenContactBrowser,
-    RefreshThreadList,
+    LeaveChat,
+    ShowChatList,
     SendMessage,
     ExecCmd(String), // colon command text (without leading ':')
     DeleteMessage,
@@ -281,12 +282,11 @@ impl App {
     }
 
     fn on_key_chat(&mut self, key: KeyEvent) -> Option<AppCmd> {
-        // Keys that need to set self.chat = None must fire before any borrow of self.chat.
+        // Leaving is a command: the handler closes the chat and refreshes its list entry.
         if matches!(self.chat.as_ref()?.mode, Mode::Normal)
             && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left)
         {
-            self.chat = None;
-            return Some(AppCmd::RefreshThreadList);
+            return Some(AppCmd::LeaveChat);
         }
 
         let own_aci = self.own_aci;
@@ -327,7 +327,7 @@ impl App {
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Char('h') | KeyCode::Left => {
-                Some(AppCmd::RefreshThreadList)
+                Some(AppCmd::ShowChatList)
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
@@ -430,6 +430,17 @@ impl App {
         if let Some(entry) = self.entry_mut(thread) {
             entry.unread = false;
         }
+    }
+
+    /// Return to the chat list, keeping the selection valid after the list may have grown.
+    fn show_chat_list(&mut self) {
+        let len = self.threads.len();
+        match self.list_state.selected() {
+            Some(sel) if len > 0 => self.list_state.select(Some(sel.min(len - 1))),
+            None if len > 0 => self.list_state.select(Some(0)),
+            _ => {}
+        }
+        self.view = View::ChatList;
     }
 }
 
@@ -1022,7 +1033,11 @@ async fn execute_cmd<S: Store>(
     match cmd {
         AppCmd::OpenChat { thread, name } => open_chat_from_store(app, manager, terminal, thread, name).await,
         AppCmd::OpenContactBrowser => open_contact_browser(app, manager).await,
-        AppCmd::RefreshThreadList => refresh_thread_list(app, manager).await,
+        AppCmd::LeaveChat => leave_chat(app, manager).await,
+        AppCmd::ShowChatList => {
+            app.show_chat_list();
+            Ok(())
+        }
         AppCmd::SendMessage => send_draft(app, manager).await,
         AppCmd::ExecCmd(text) => run_colon_command(app, manager, terminal, &text).await,
         AppCmd::DeleteMessage => delete_selected(app, manager).await,
@@ -1067,21 +1082,23 @@ async fn open_contact_browser<S: Store>(app: &mut App, manager: &mut Manager<S, 
     Ok(())
 }
 
-async fn refresh_thread_list<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
-    let mut threads = signal::list_threads(manager, &app.data_dir, app.own_aci).await?;
-    // The store cannot know what the user has seen; keep this session's flags.
-    for entry in &mut threads {
-        entry.unread = app.threads.iter().any(|old| old.unread && old.thread == entry.thread);
+/// Close the chat and bring its list entry up to date: messages sent from the
+/// chat do not go through the live fold, so the preview is re-derived from the store.
+async fn leave_chat<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
+    if let Some(chat) = app.chat.take() {
+        let (preview, ts) = signal::last_message(manager, &chat.thread).await;
+        if ts > 0 {
+            match app.entry_mut(&chat.thread) {
+                Some(entry) => {
+                    entry.last_preview = preview;
+                    entry.last_ts = ts;
+                }
+                None => app.threads.push(ThreadEntry::new(chat.thread, chat.thread_name, preview, ts)),
+            }
+            signal::sort_recent_first(&mut app.threads);
+        }
     }
-    app.threads = threads;
-    // Clamp selection so it stays valid after the list changes.
-    let new_len = app.threads.len();
-    match app.list_state.selected() {
-        Some(sel) if new_len > 0 => app.list_state.select(Some(sel.min(new_len - 1))),
-        None if new_len > 0 => app.list_state.select(Some(0)),
-        _ => {}
-    }
-    app.view = View::ChatList;
+    app.show_chat_list();
     Ok(())
 }
 
