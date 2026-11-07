@@ -608,6 +608,10 @@ async fn contact_display_name<S: Store>(
 async fn cached_profile_name<S: Store>(manager: &Manager<S, Registered>, uuid: Uuid) -> Option<String> {
     let service_id = ServiceId::Aci(uuid.into());
     let key = manager.store().profile_key(&service_id).await.ok().flatten()?;
+    stored_profile_name(manager, uuid, key).await
+}
+
+async fn stored_profile_name<S: Store>(manager: &Manager<S, Registered>, uuid: Uuid, key: ProfileKey) -> Option<String> {
     let profile = manager.store().profile(uuid, key).await.ok().flatten()?;
     profile_display_name(profile.name)
 }
@@ -887,13 +891,7 @@ pub async fn roster_names<S: Store>(
                 }
                 let cached = match lookup_contact_name(manager, uuid).await {
                     Some(name) => Some(name),
-                    None => manager
-                        .store()
-                        .profile(uuid, member.profile_key)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|profile| profile_display_name(profile.name)),
+                    None => stored_profile_name(manager, uuid, member.profile_key).await,
                 };
                 match cached {
                     Some(name) => {
