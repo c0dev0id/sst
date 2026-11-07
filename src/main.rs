@@ -240,7 +240,7 @@ async fn send(request: ipc::SendRequest, db_path: PathBuf, data_dir: PathBuf) ->
     let deadline = std::time::Instant::now() + SEND_WAIT;
     loop {
         if let Some(outcome) = ipc::request_send(&socket, &request)? {
-            return outcome.map_err(|e| anyhow::anyhow!(e));
+            return outcome.map_err(anyhow::Error::msg);
         }
         if let Ok(_guard) = lock.try_write() {
             return send_direct(request, db_path, data_dir).await;
@@ -478,7 +478,7 @@ async fn run<S: Store>(
                     tokio::select! {
                         Some(job) = send_jobs.recv() => {
                             let result = ipc::perform(&mut manager, &job.request).await;
-                            job.finish(result.map(|_| ()));
+                            job.finish(result);
                         }
                         event = stream.next() => {
                             let Some(event) = event else { break };

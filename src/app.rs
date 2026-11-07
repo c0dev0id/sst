@@ -948,19 +948,16 @@ async fn fold_live_message<S: Store>(app: &mut App, manager: &Manager<S, Registe
     }
 }
 
-/// Carry out a send that arrived over the socket, then show the message as if
-/// it had arrived live.
+/// Carry out a send that arrived over the socket, then show the stored message
+/// exactly as if it had arrived live.
 async fn handle_send_job<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>, job: ipc::SendJob) {
     let result = ipc::perform(manager, &job.request).await;
-    if let Ok((thread, ts)) = &result {
-        if app.chat.as_ref().is_some_and(|c| &c.thread == thread) {
-            reload_chat(manager, thread, &mut app.chat).await;
-        }
-        if let Ok(Some(content)) = manager.store().message(thread, *ts).await {
-            fold_live_message(app, manager, &content).await;
-        }
+    if let Ok((thread, ts)) = &result
+        && let Ok(Some(content)) = manager.store().message(thread, *ts).await
+    {
+        on_live_event(app, manager, &Received::Content(Box::new(content))).await;
     }
-    job.finish(result.map(|_| ()));
+    job.finish(result);
 }
 
 /// Send read receipts for the open chat's messages from others that have not

@@ -20,9 +20,9 @@ use crate::signal;
 
 #[derive(Serialize, Deserialize)]
 pub struct SendRequest {
-    pub recipient: String,
-    pub text: String,
-    pub attachments: Vec<PathBuf>,
+    recipient: String,
+    text: String,
+    attachments: Vec<PathBuf>,
 }
 
 impl SendRequest {
@@ -38,21 +38,18 @@ impl SendRequest {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct SendResponse {
-    ok: bool,
-    error: Option<String>,
-}
+/// What the holder tells the client: success, or the error text.
+type Outcome = Result<(), String>;
 
 /// A request received over the socket, to be carried out by the session holder.
 pub struct SendJob {
     pub request: SendRequest,
-    reply: oneshot::Sender<Result<(), String>>,
+    reply: oneshot::Sender<Outcome>,
 }
 
 impl SendJob {
-    pub fn finish(self, result: anyhow::Result<()>) {
-        let _ = self.reply.send(result.map_err(|e| format!("{e:#}")));
+    pub fn finish<T>(self, result: anyhow::Result<T>) {
+        let _ = self.reply.send(result.map(drop).map_err(|e| format!("{e:#}")));
     }
 }
 
@@ -107,20 +104,20 @@ async fn handle_connection(stream: tokio::net::UnixStream, jobs: mpsc::Sender<Se
     if tokio::io::BufReader::new(reader).read_line(&mut line).await.is_err() {
         return;
     }
-    let outcome = match serde_json::from_str::<SendRequest>(&line) {
-        Ok(request) => {
-            let (reply, done) = oneshot::channel();
-            match jobs.send(SendJob { request, reply }).await {
-                Ok(()) => done.await.unwrap_or_else(|_| Err("session holder went away".to_string())),
-                Err(_) => Err("session holder is shutting down".to_string()),
-            }
-        }
-        Err(e) => Err(format!("malformed request: {e}")),
-    };
-    let response = SendResponse { ok: outcome.is_ok(), error: outcome.err() };
-    let mut encoded = serde_json::to_string(&response).expect("response serializes");
+    let outcome = dispatch(&line, &jobs).await;
+    let mut encoded = serde_json::to_string(&outcome).expect("outcome serializes");
     encoded.push('\n');
     let _ = writer.write_all(encoded.as_bytes()).await;
+}
+
+/// Hand one request line to the session holder and wait for its verdict.
+async fn dispatch(line: &str, jobs: &mpsc::Sender<SendJob>) -> Outcome {
+    let request = serde_json::from_str(line).map_err(|e| format!("malformed request: {e}"))?;
+    let (reply, done) = oneshot::channel();
+    jobs.send(SendJob { request, reply })
+        .await
+        .map_err(|_| "session holder is shutting down".to_string())?;
+    done.await.unwrap_or_else(|_| Err("session holder went away".to_string()))
 }
 
 /// Hand a request to a running session holder. Ok(None) when none is listening.
@@ -136,12 +133,8 @@ pub fn request_send(path: &Path, request: &SendRequest) -> anyhow::Result<Option
     stream.write_all(encoded.as_bytes())?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).context("reading the send socket reply")?;
-    let response: SendResponse = serde_json::from_str(&line).context("malformed send socket reply")?;
-    Ok(Some(if response.ok {
-        Ok(())
-    } else {
-        Err(response.error.unwrap_or_else(|| "send failed".to_string()))
-    }))
+    let outcome: Outcome = serde_json::from_str(&line).context("malformed send socket reply")?;
+    Ok(Some(outcome))
 }
 
 /// Carry out a request with the session: upload the attachments and send.
@@ -192,7 +185,7 @@ mod tests {
                 let job = jobs.recv().await.unwrap();
                 assert_eq!(job.request.text, "hi\nthere");
                 assert_eq!(job.request.attachments, vec![PathBuf::from("/tmp/x.png")]);
-                job.finish(Err(anyhow::anyhow!("not a member")));
+                job.finish(Err::<(), _>(anyhow::anyhow!("not a member")));
 
                 let outcome = client.await.unwrap().unwrap();
                 assert_eq!(outcome, Some(Err("not a member".to_string())));
