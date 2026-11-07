@@ -332,14 +332,14 @@ async fn run<S: Store>(
         load_manager(store).await?
     };
 
-    let mut state = signal::SyncState { data_dir, own_aci: Some(signal::own_aci(&manager)) };
+    let own = Some(signal::own_aci(&manager));
 
     match cmd {
         None => {
-            let stream = signal::connect(&mut manager, &mut state).await?;
+            let stream = signal::connect(&mut manager, &data_dir).await?;
             eprintln!("Loading chats…");
-            let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
-            app::run(threads, state.own_aci, state.data_dir, manager, stream).await
+            let threads = signal::list_threads(&manager, &data_dir, own).await?;
+            app::run(threads, own, data_dir, manager, stream).await
         }
 
         Some(Cmd::Link) => {
@@ -349,9 +349,9 @@ async fn run<S: Store>(
 
         Some(Cmd::Chats { format }) => {
             if may_sync {
-                signal::sync(&mut manager, &mut state).await?;
+                signal::sync(&mut manager, &data_dir).await?;
             }
-            let threads = signal::list_threads(&manager, &state.data_dir, state.own_aci).await?;
+            let threads = signal::list_threads(&manager, &data_dir, own).await?;
             for entry in &threads {
                 match format {
                     Format::Text => {
@@ -377,12 +377,12 @@ async fn run<S: Store>(
         Some(Cmd::Contacts { format }) => {
             if may_sync {
                 eprintln!("Syncing contacts…");
-                signal::sync_contacts(&mut manager, &mut state).await?;
+                signal::sync_contacts(&mut manager).await?;
                 if let Err(e) = signal::fetch_missing_profiles(&mut manager).await {
                     tracing::warn!("profile fetch: {e:#}");
                 }
             }
-            let (contacts, _) = signal::list_all_contacts(&manager, state.own_aci).await?;
+            let (contacts, _) = signal::list_all_contacts(&manager, own).await?;
             for entry in &contacts {
                 match &entry.thread {
                     Thread::Contact(sid) => {
@@ -411,7 +411,7 @@ async fn run<S: Store>(
 
         Some(Cmd::Print { format, recipient }) => {
             if may_sync {
-                signal::sync(&mut manager, &mut state).await?;
+                signal::sync(&mut manager, &data_dir).await?;
             }
             let thread = signal::parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread, None).await?;
@@ -421,7 +421,7 @@ async fn run<S: Store>(
 
         Some(Cmd::PrintLast { count, format, recipient }) => {
             if may_sync {
-                signal::sync(&mut manager, &mut state).await?;
+                signal::sync(&mut manager, &data_dir).await?;
             }
             let thread = signal::parse_thread_id(&recipient)?;
             let (messages, _) = signal::load_messages_and_reactions(&manager, &thread, None).await?;
@@ -432,10 +432,10 @@ async fn run<S: Store>(
 
         Some(Cmd::Recent { since, mentions_me, limit, format }) => {
             if may_sync {
-                signal::sync(&mut manager, &mut state).await?;
+                signal::sync(&mut manager, &data_dir).await?;
             }
             let since_ms = signal::since_to_millis(&since, signal::now_millis()?)?;
-            let recent = signal::recent_messages(&mut manager, &state.data_dir, since_ms, mentions_me, limit).await?;
+            let recent = signal::recent_messages(&mut manager, &data_dir, since_ms, mentions_me, limit).await?;
             for m in &recent {
                 match format {
                     Format::Text => {
@@ -458,7 +458,7 @@ async fn run<S: Store>(
 
         Some(Cmd::Watch { format, recipient }) => {
             let thread = signal::parse_thread_id(&recipient)?;
-            let (mut send_jobs, _send_socket) = ipc::serve(&state.data_dir)?;
+            let (mut send_jobs, _send_socket) = ipc::serve(&data_dir)?;
             // BTreeSet allows evicting entries older than the dedup window in O(log n).
             let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
             let mut names = signal::load_sender_names(&mut manager, &thread, None, None).await;

@@ -102,10 +102,6 @@ pub fn is_own(content: &Content, own_aci: Option<Uuid>) -> bool {
     own_aci == Some(content.metadata.sender.raw_uuid())
 }
 
-pub struct SyncState {
-    pub data_dir: std::path::PathBuf,
-    pub own_aci: Option<Uuid>,
-}
 
 #[derive(Clone)]
 pub struct StagedAttachment {
@@ -282,24 +278,23 @@ pub async fn download_attachment<S: Store>(
     Ok(final_path)
 }
 
-impl SyncState {
-    fn groups_path(&self) -> std::path::PathBuf {
-        self.data_dir.join("known_groups")
-    }
+// Side files next to the store: groups and contacts seen in message traffic,
+// which presage does not enumerate on its own.
+fn known_groups_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("known_groups")
+}
 
-    fn contacts_path(&self) -> std::path::PathBuf {
-        self.data_dir.join("known_contacts")
-    }
+fn known_contacts_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("known_contacts")
 }
 
 async fn drain_backlog<S: Store>(
     stream: &mut (impl Stream<Item = Received> + Unpin),
     manager: &mut Manager<S, Registered>,
-    state: &mut SyncState,
+    data_dir: &Path,
     show_progress: bool,
 ) -> anyhow::Result<()> {
-    let own_aci = manager.whoami().await?.aci;
-    state.own_aci = Some(own_aci);
+    let own = own_aci(manager);
 
     let mut count = 0usize;
     let mut seen_group_keys: HashSet<[u8; 32]> = HashSet::new();
@@ -331,7 +326,7 @@ async fn drain_backlog<S: Store>(
                     }
                     Ok(Thread::Contact(service_id)) => {
                         let uuid = service_id.raw_uuid();
-                        if uuid != own_aci {
+                        if uuid != own {
                             seen_contact_uuids.insert(*uuid.as_bytes());
                         }
                     }
@@ -342,9 +337,9 @@ async fn drain_backlog<S: Store>(
         }
     }
 
-    let mut known_groups = load_chunks::<32>(&state.groups_path());
+    let mut known_groups = load_chunks::<32>(&known_groups_path(data_dir));
     known_groups.extend(seen_group_keys);
-    let _ = save_chunks(&state.groups_path(), &known_groups);
+    let _ = save_chunks(&known_groups_path(data_dir), &known_groups);
 
     let mut announced_group_fetch = false;
     for key in &known_groups {
@@ -365,9 +360,9 @@ async fn drain_backlog<S: Store>(
         }
     }
 
-    let mut known_contacts = load_chunks::<16>(&state.contacts_path());
+    let mut known_contacts = load_chunks::<16>(&known_contacts_path(data_dir));
     known_contacts.extend(seen_contact_uuids);
-    let _ = save_chunks(&state.contacts_path(), &known_contacts);
+    let _ = save_chunks(&known_contacts_path(data_dir), &known_contacts);
 
     if let Err(e) = manager.request_contacts().await {
         eprintln!("Warning: could not request contact sync: {e}");
@@ -379,13 +374,7 @@ async fn drain_backlog<S: Store>(
 /// Drain the pending queue (discarding message content), request a fresh
 /// contact list from the primary device, and wait for it to arrive.
 /// Much faster than a full sync when only the contact list is needed.
-pub async fn sync_contacts<S: Store>(
-    manager: &mut Manager<S, Registered>,
-    state: &mut SyncState,
-) -> anyhow::Result<()> {
-    let own_aci = manager.whoami().await?.aci;
-    state.own_aci = Some(own_aci);
-
+pub async fn sync_contacts<S: Store>(manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
     let mut stream = Box::pin(
         manager
             .receive_messages()
@@ -423,23 +412,20 @@ pub async fn sync_contacts<S: Store>(
 }
 
 /// Drain the pending message queue to force a resync from the primary device.
-pub async fn sync<S: Store>(
-    manager: &mut Manager<S, Registered>,
-    state: &mut SyncState,
-) -> anyhow::Result<()> {
+pub async fn sync<S: Store>(manager: &mut Manager<S, Registered>, data_dir: &Path) -> anyhow::Result<()> {
     let mut stream = Box::pin(
         manager
             .receive_messages()
             .await
             .context("failed to start receive stream")?,
     );
-    drain_backlog(&mut stream, manager, state, false).await
+    drain_backlog(&mut stream, manager, data_dir, false).await
 }
 
 /// Drain the message queue then return the live stream for TUI mode.
 pub async fn connect<S: Store>(
     manager: &mut Manager<S, Registered>,
-    state: &mut SyncState,
+    data_dir: &Path,
 ) -> anyhow::Result<Pin<Box<dyn Stream<Item = Received>>>> {
     eprintln!("Connecting to Signal…");
     let mut stream: Pin<Box<dyn Stream<Item = Received>>> = Box::pin(
@@ -448,7 +434,7 @@ pub async fn connect<S: Store>(
             .await
             .context("failed to start receive stream")?,
     );
-    drain_backlog(&mut stream, manager, state, true).await?;
+    drain_backlog(&mut stream, manager, data_dir, true).await?;
     Ok(stream)
 }
 
@@ -512,7 +498,7 @@ async fn known_threads<S: Store>(
         threads.push((Thread::Contact(ServiceId::Aci(contact.uuid.into())), name));
     }
 
-    for uuid_bytes in load_chunks::<16>(&data_dir.join("known_contacts")) {
+    for uuid_bytes in load_chunks::<16>(&known_contacts_path(data_dir)) {
         let uuid = Uuid::from_bytes(uuid_bytes);
         if !seen.insert(uuid) {
             continue;
