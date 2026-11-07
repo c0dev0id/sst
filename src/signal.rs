@@ -187,8 +187,6 @@ async fn drain_backlog<S: Store>(
     data_dir: &Path,
     show_progress: bool,
 ) -> anyhow::Result<()> {
-    let own = own_aci(manager);
-
     let mut count = 0usize;
     let mut seen_group_keys: HashSet<[u8; 32]> = HashSet::new();
     let mut seen_contact_uuids: HashSet<[u8; 16]> = HashSet::new();
@@ -218,10 +216,7 @@ async fn drain_backlog<S: Store>(
                         seen_group_keys.insert(key);
                     }
                     Ok(Thread::Contact(service_id)) => {
-                        let uuid = service_id.raw_uuid();
-                        if uuid != own {
-                            seen_contact_uuids.insert(*uuid.as_bytes());
-                        }
+                        seen_contact_uuids.insert(*service_id.raw_uuid().as_bytes());
                     }
                     Err(_) => {}
                 }
@@ -389,7 +384,8 @@ fn remember<const N: usize>(path: &Path, item: [u8; N]) {
 }
 
 /// Every thread the store knows, with its display name: contacts, contacts
-/// seen only in message traffic, and groups.
+/// seen only in message traffic, and groups. The user's own thread is listed
+/// through the store contact only, so the side file never adds it by UUID.
 async fn known_threads<S: Store>(
     manager: &Manager<S, Registered>,
     data_dir: &Path,
@@ -411,7 +407,7 @@ async fn known_threads<S: Store>(
 
     for uuid_bytes in load_chunks::<16>(&known_contacts_path(data_dir)) {
         let uuid = Uuid::from_bytes(uuid_bytes);
-        if !seen.insert(uuid) {
+        if own_aci == Some(uuid) || !seen.insert(uuid) {
             continue;
         }
         let name = or_uuid(lookup_contact_name(manager, uuid).await, uuid);
