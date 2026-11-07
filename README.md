@@ -84,3 +84,13 @@ instance and sync first when nothing else is running; `watch` holds the session.
 
 `<ID>` is a contact UUID or 64-char hex group master key (from `sst contacts`).
 Add `--format=json` for NDJSON output, or `--db <PATH>` to override the store location.
+
+JSON records, one per line. Timestamps are RFC 3339. These fields are an
+interface other tools parse; renaming one is a breaking change.
+
+| Command | Fields |
+|---------|--------|
+| `chats` | `id`, `name`, `preview`, `timestamp` |
+| `contacts` | `id`, `name`, `type` (`contact` or `group`) |
+| `print`, `print-last`, `watch` | `timestamp`, `sender_uuid`, `sender_name`, `body`; `watch` adds `edit_of` on an edit |
+| `recent` | the message fields plus `chat_id`, `chat_name`, `mentions_me` |

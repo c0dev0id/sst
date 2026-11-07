@@ -362,15 +362,7 @@ async fn run<S: Store>(
                             _ => println!("{}", entry.name),
                         }
                     }
-                    Format::Json => {
-                        let id = thread_id_string(&entry.thread);
-                        println!("{}", serde_json::json!({
-                            "id":        id,
-                            "name":      entry.name,
-                            "preview":   entry.last_preview,
-                            "timestamp": iso_timestamp(entry.last_ts),
-                        }));
-                    }
+                    Format::Json => println!("{}", chat_record(entry)),
                 }
             }
             Ok(())
@@ -386,26 +378,9 @@ async fn run<S: Store>(
             }
             let (contacts, _) = signal::list_all_contacts(&manager, own).await?;
             for entry in &contacts {
-                match &entry.thread {
-                    Thread::Contact(sid) => {
-                        let uuid = sid.raw_uuid();
-                        let name = entry.name.as_str();
-                        match format {
-                            Format::Text => println!("{} {}", uuid, name),
-                            Format::Json => println!("{}", serde_json::json!({
-                                "id": uuid.to_string(), "name": name, "type": "contact",
-                            })),
-                        }
-                    }
-                    Thread::Group(key) => {
-                        let hex = hex_string(key);
-                        match format {
-                            Format::Text => println!("{} {}", hex, entry.name),
-                            Format::Json => println!("{}", serde_json::json!({
-                                "id": hex, "name": entry.name, "type": "group",
-                            })),
-                        }
-                    }
+                match format {
+                    Format::Text => println!("{} {}", thread_id_string(&entry.thread), entry.name),
+                    Format::Json => println!("{}", contact_record(entry)),
                 }
             }
             Ok(())
@@ -444,13 +419,7 @@ async fn run<S: Store>(
                         let mark = if m.mentions_me { "@ " } else { "" };
                         println!("[{}] {}{} / {}: {}", signal::fmt_ts_long(m.ts), mark, m.thread_name, m.sender_name, m.body);
                     }
-                    Format::Json => {
-                        let mut record = message_record(m.ts, m.sender, &m.sender_name, &m.body, None);
-                        record["chat_id"] = serde_json::Value::String(thread_id_string(&m.thread));
-                        record["chat_name"] = serde_json::Value::String(m.thread_name.clone());
-                        record["mentions_me"] = serde_json::Value::Bool(m.mentions_me);
-                        println!("{record}");
-                    }
+                    Format::Json => println!("{}", recent_record(m)),
                 }
             }
             Ok(())
@@ -574,6 +543,34 @@ fn since_to_millis(spec: &str, now_ms: u64) -> anyhow::Result<u64> {
     Ok(now_ms.saturating_sub(amount.saturating_mul(unit_ms)))
 }
 
+// The JSON records are an interface (mcpd parses them): one builder per record,
+// key sets pinned by tests and listed in the README.
+
+fn chat_record(entry: &signal::ThreadEntry) -> serde_json::Value {
+    serde_json::json!({
+        "id":        thread_id_string(&entry.thread),
+        "name":      entry.name,
+        "preview":   entry.last_preview,
+        "timestamp": iso_timestamp(entry.last_ts),
+    })
+}
+
+fn contact_record(entry: &signal::ThreadEntry) -> serde_json::Value {
+    let kind = match entry.thread {
+        Thread::Contact(_) => "contact",
+        Thread::Group(_) => "group",
+    };
+    serde_json::json!({ "id": thread_id_string(&entry.thread), "name": entry.name, "type": kind })
+}
+
+fn recent_record(m: &signal::RecentMessage) -> serde_json::Value {
+    let mut record = message_record(m.ts, m.sender, &m.sender_name, &m.body, None);
+    record["chat_id"] = serde_json::Value::String(thread_id_string(&m.thread));
+    record["chat_name"] = serde_json::Value::String(m.thread_name.clone());
+    record["mentions_me"] = serde_json::Value::Bool(m.mentions_me);
+    record
+}
+
 /// The JSON fields every message-printing subcommand shares.
 fn message_record(ts_ms: u64, sender_uuid: Uuid, sender_name: &str, body: &str, edit_of: Option<u64>) -> serde_json::Value {
     let mut record = serde_json::json!({
@@ -607,7 +604,41 @@ fn format_one(
 
 #[cfg(test)]
 mod tests {
-    use super::since_to_millis;
+    use super::*;
+
+    fn keys(record: &serde_json::Value) -> Vec<&str> {
+        record.as_object().unwrap().keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn json_records_keep_their_fields() {
+        let thread = signal::parse_thread_id("11111111-1111-1111-1111-111111111111").unwrap();
+        let entry = signal::ThreadEntry::new(thread.clone(), "Alice".to_string(), Some("hi".to_string()), 1_000);
+        assert_eq!(keys(&chat_record(&entry)), ["id", "name", "preview", "timestamp"]);
+        assert_eq!(keys(&contact_record(&entry)), ["id", "name", "type"]);
+        assert_eq!(contact_record(&entry)["type"], "contact");
+        assert_eq!(
+            keys(&message_record(1_000, Uuid::nil(), "Alice", "hi", None)),
+            ["body", "sender_name", "sender_uuid", "timestamp"]
+        );
+        assert_eq!(
+            keys(&message_record(1_000, Uuid::nil(), "Alice", "hi", Some(500))),
+            ["body", "edit_of", "sender_name", "sender_uuid", "timestamp"]
+        );
+        let recent = signal::RecentMessage {
+            ts: 1_000,
+            thread,
+            thread_name: "Alice".to_string(),
+            sender: Uuid::nil(),
+            sender_name: "Alice".to_string(),
+            body: "hi".to_string(),
+            mentions_me: true,
+        };
+        assert_eq!(
+            keys(&recent_record(&recent)),
+            ["body", "chat_id", "chat_name", "mentions_me", "sender_name", "sender_uuid", "timestamp"]
+        );
+    }
 
     #[test]
     fn since_accepts_durations_and_timestamps() {
