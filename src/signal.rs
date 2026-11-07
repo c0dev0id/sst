@@ -65,9 +65,8 @@ pub struct ThreadEntry {
 }
 
 impl ThreadEntry {
-    // Constructors never set unread=true: the data source doesn't know
-    // whether the user has seen the message. Only the live-event fold in
-    // app.rs marks a thread unread.
+    // Constructors never set unread=true: list_threads derives it from the
+    // last-seen marks and the live fold in app.rs sets it for new messages.
     pub fn new(thread: Thread, name: String, last_preview: Option<String>, last_ts: u64) -> Self {
         Self { thread, name, last_preview, last_ts, unread: false }
     }
@@ -79,6 +78,14 @@ pub struct MessageUpdate {
     pub preview: String,
     pub ts: u64,              // when this message, or this edit, was sent
     pub edit_of: Option<u64>, // for an edit, the timestamp of the message it replaces
+}
+
+/// A thread's CLI form: the contact UUID or the group master key in hex.
+pub fn thread_id(thread: &Thread) -> String {
+    match thread {
+        Thread::Contact(sid) => sid.raw_uuid().to_string(),
+        Thread::Group(key) => key.iter().map(|b| format!("{b:02x}")).collect(),
+    }
 }
 
 /// A thread from its CLI form: a contact UUID or a 64-char hex group master key.
@@ -102,6 +109,62 @@ pub(crate) fn sort_recent_first(entries: &mut [ThreadEntry]) {
 
 pub fn is_own(content: &Content, own_aci: Option<Uuid>) -> bool {
     own_aci == Some(content.metadata.sender.raw_uuid())
+}
+
+/// Per-thread timestamp of the newest message the user has seen, kept in
+/// `last_seen.json` next to the store. Drives unread markers across restarts
+/// and lets read receipts go out once per message.
+pub struct LastSeen {
+    path: PathBuf,
+    seen: HashMap<String, u64>,
+}
+
+impl LastSeen {
+    pub fn load(data_dir: &Path) -> Self {
+        let path = data_dir.join("last_seen.json");
+        let seen = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self { path, seen }
+    }
+
+    pub fn get(&self, thread: &Thread) -> u64 {
+        self.seen.get(&thread_id(thread)).copied().unwrap_or(0)
+    }
+
+    /// Move the mark forward to `ts` and persist it; an earlier `ts` changes nothing.
+    pub fn advance(&mut self, thread: &Thread, ts: u64) {
+        let mark = self.seen.entry(thread_id(thread)).or_insert(0);
+        if ts <= *mark {
+            return;
+        }
+        *mark = ts;
+        if let Ok(json) = serde_json::to_vec(&self.seen) {
+            let _ = std::fs::write(&self.path, json);
+        }
+    }
+}
+
+/// Messages the user's other devices report as read, as (author, timestamp).
+pub fn read_sync(received: &Received) -> Vec<(ServiceId, u64)> {
+    let Received::Content(content) = received else { return Vec::new() };
+    let ContentBody::SynchronizeMessage(SyncMessage { read, .. }) = &content.body else { return Vec::new() };
+    read.iter()
+        .filter_map(|entry| {
+            let aci = match (&entry.sender_aci_binary, &entry.sender_aci) {
+                (Some(bytes), _) => Uuid::from_slice(bytes).ok()?,
+                (None, Some(text)) => Uuid::parse_str(text).ok()?,
+                (None, None) => return None,
+            };
+            Some((ServiceId::Aci(aci.into()), entry.timestamp?))
+        })
+        .collect()
+}
+
+/// The thread a message was stored in, from its author and timestamp.
+pub async fn thread_of_message<S: Store>(manager: &Manager<S, Registered>, author: &ServiceId, ts: u64) -> Option<Thread> {
+    manager.store().thread_for_sender_and_timestamp(author, ts).await.ok().flatten()
 }
 
 
@@ -357,17 +420,21 @@ async fn known_threads<S: Store>(
 }
 
 /// Build a chat list from contacts, known-but-unsynced contacts, and groups.
-/// Sorted most-recent-first; threads with no messages are omitted.
+/// Sorted most-recent-first; threads with no messages are omitted. A thread is
+/// unread when its newest message is from someone else and newer than the mark.
 pub async fn list_threads<S: Store>(
     manager: &Manager<S, Registered>,
     data_dir: &Path,
     own_aci: Option<Uuid>,
+    last_seen: &LastSeen,
 ) -> anyhow::Result<Vec<ThreadEntry>> {
     let mut entries: Vec<ThreadEntry> = Vec::new();
     for (thread, name) in known_threads(manager, data_dir, own_aci).await? {
-        let (last_preview, last_ts) = last_message(manager, &thread).await;
-        if last_ts > 0 {
-            entries.push(ThreadEntry::new(thread, name, last_preview, last_ts));
+        if let Some(latest) = last_message(manager, &thread).await {
+            let unread = !latest.from_self && latest.ts > last_seen.get(&thread);
+            let mut entry = ThreadEntry::new(thread, name, Some(latest.preview), latest.ts);
+            entry.unread = unread;
+            entries.push(entry);
         }
     }
     sort_recent_first(&mut entries);
@@ -577,17 +644,21 @@ fn save_chunks<const N: usize>(path: &Path, items: &HashSet<[u8; N]>) -> std::io
     std::fs::write(path, bytes)
 }
 
-/// Preview text and timestamp of the newest displayable message in a thread.
-/// Receipts, reactions, deletions and edit records are skipped so bookkeeping
-/// rows cannot reorder the chat list. The store yields newest first, so an edit
-/// is seen before its target and replaces the target's text. A thread whose
-/// newest rows are all bookkeeping is treated as empty after a bounded scan.
-pub async fn last_message<S: Store>(
-    manager: &Manager<S, Registered>,
-    thread: &Thread,
-) -> (Option<String>, u64) {
+/// The newest displayable message in a thread, for the chat list.
+pub struct LatestMessage {
+    pub preview: String,
+    pub ts: u64,
+    pub from_self: bool,
+}
+
+/// The newest displayable message in a thread. Receipts, reactions, deletions
+/// and edit records are skipped so bookkeeping rows cannot reorder the chat
+/// list. The store yields newest first, so an edit is seen before its target
+/// and replaces the target's text. A thread whose newest rows are all
+/// bookkeeping is treated as empty after a bounded scan.
+pub async fn last_message<S: Store>(manager: &Manager<S, Registered>, thread: &Thread) -> Option<LatestMessage> {
     let Ok(iter) = manager.store().messages(thread, ..).await else {
-        return (None, 0);
+        return None;
     };
     let mut edits: HashMap<u64, DataMessage> = HashMap::new();
     for result in iter.take(500) {
@@ -603,9 +674,13 @@ pub async fn last_message<S: Store>(
             apply_edit(&mut content, edited);
         }
         let names = mention_names(manager, &content).await;
-        return (Some(message_body(&content, |u| name_or_uuid(&names, u))), content.timestamp());
+        return Some(LatestMessage {
+            preview: message_body(&content, |u| name_or_uuid(&names, u)),
+            ts: content.timestamp(),
+            from_self: is_own(&content, Some(own_aci(manager))),
+        });
     }
-    (None, 0)
+    None
 }
 
 /// The DataMessage carried by incoming content or by a sync of our own sent message.
@@ -1424,6 +1499,19 @@ mod tests {
         assert_eq!(fmt_duration(300), "5 minutes");
         assert_eq!(fmt_duration(30), "30 seconds");
         assert_eq!(fmt_duration(90), "90 seconds");
+    }
+
+    #[test]
+    fn last_seen_marks_only_move_forward_and_survive_reload() {
+        let dir = std::env::temp_dir().join(format!("sst-last-seen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let thread = parse_thread_id("11111111-1111-1111-1111-111111111111").unwrap();
+        let mut marks = LastSeen::load(&dir);
+        assert_eq!(marks.get(&thread), 0);
+        marks.advance(&thread, 500);
+        marks.advance(&thread, 300);
+        assert_eq!(marks.get(&thread), 500);
+        assert_eq!(LastSeen::load(&dir).get(&thread), 500);
     }
 
     #[test]

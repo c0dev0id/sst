@@ -74,6 +74,7 @@ Delete-for-everyone is `dd` (two-press confirmation, guarded by `pending_d`).
 - `sst.lock` — `fd_lock` exclusive lock for interactive/session-holding subcommands
 - `sst.sock` — send socket, served by the TUI or `sst watch` while running; a stale file is replaced on the next start
 - `known_contacts`, `known_groups` — contacts and groups seen in message traffic, which presage does not enumerate; written by the startup drain and by the live fold
+- `last_seen.json` — per-thread timestamp of the newest message the user has seen (`signal::LastSeen`); unread markers and read receipts derive from it
 
 `--db <path>` overrides the store location; the log and lock still go next to it (parent directory).
 
@@ -87,7 +88,7 @@ Pre-1.0.0: no migration code. If the on-disk format changes, `sst link` wipes an
 - **Cursor is a byte offset** into the UTF-8 input string. Visual (line, column) is derived at render time via `cursor_line_col`. Keep it that way — two representations will desync.
 - **Groups always have a title** in Signal; no unnamed-group fallback is needed. But group metadata may be missing right after `sst link` (see journal "Group metadata gap after fresh device linking") — this is a presage limitation, not a bug in this code.
 - **A thread's rows are not all messages.** presage stores receipts (including the ones sst sends), NullMessage rows from remote deletes, call signalling and edit records in the thread table. Anything deriving "newest message" or "display list" must go through `message_body` emptiness, as `last_message` and `load_messages_and_reactions` do. `ContentExt::timestamp()` of an EditMessage is the *target's* timestamp.
-- **Group receipts live in members' 1:1 threads.** A ReceiptMessage has no group context, so presage files it under `Thread::Contact(sender)`. `load_receipt_state` scans roster members' threads for groups; `send_read_receipts` sends to each author and syncs `SyncMessage.read` to own devices.
+- **Group receipts live in members' 1:1 threads.** A ReceiptMessage has no group context, so presage files it under `Thread::Contact(sender)`. `load_receipt_state` scans roster members' threads for groups; `send_read_receipts` sends to each author and syncs `SyncMessage.read` to own devices. Receipts go out for messages newer than the thread's last-seen mark only; the phone's own read sync moves the mark too.
 - **Mentions are not text.** `@Name` exists only in the input buffer and on screen. On the wire a mention is U+FFFC in the body plus a `BodyRange` with UTF-16 offsets. `mentions.rs` is the only module that knows this; `message_body` takes a name resolver for that reason. Never display a raw `DataMessage.body`.
 - **`Manager::send_message()` writes to the local store synchronously before returning** — after send, reload messages from the DB directly rather than waiting for the SyncMessage echo. This is what `reload_chat` does.
 

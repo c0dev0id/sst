@@ -181,6 +181,15 @@ copies quote, attachments and timer itself. Signal accepts edits and
 delete-for-everyone for 24 hours; recipients ignore later requests, so sst refuses
 them up front instead of applying them locally and diverging.
 
+### Last-seen marks
+
+presage keeps no record of what the user has read, so sst keeps one: `last_seen.json`
+maps each thread to the timestamp of the newest message shown. The chat list derives
+unread from it, read receipts go out only for messages newer than it, and a
+`SyncMessage.read` from the phone advances it. A message that arrives late with an
+older timestamp is treated as seen; that is the price of a per-thread mark instead
+of per-message state, and the reason expiry of disappearing messages still waits.
+
 ### Errors stay in the TUI
 
 `execute_cmd` errors are shown on the status bar and logged; they never propagate out

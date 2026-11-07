@@ -342,7 +342,7 @@ async fn run<S: Store>(
         None => {
             let stream = signal::connect(&mut manager, &data_dir).await?;
             eprintln!("Loading chats…");
-            let threads = signal::list_threads(&manager, &data_dir, own).await?;
+            let threads = signal::list_threads(&manager, &data_dir, own, &signal::LastSeen::load(&data_dir)).await?;
             app::run(threads, own, data_dir, manager, stream).await
         }
 
@@ -355,7 +355,7 @@ async fn run<S: Store>(
             if may_sync {
                 signal::sync(&mut manager, &data_dir).await?;
             }
-            let threads = signal::list_threads(&manager, &data_dir, own).await?;
+            let threads = signal::list_threads(&manager, &data_dir, own, &signal::LastSeen::load(&data_dir)).await?;
             for entry in &threads {
                 match format {
                     Format::Text => {
@@ -381,7 +381,7 @@ async fn run<S: Store>(
             let (contacts, _) = signal::list_all_contacts(&manager, own).await?;
             for entry in &contacts {
                 match format {
-                    Format::Text => println!("{} {}", thread_id_string(&entry.thread), entry.name),
+                    Format::Text => println!("{} {}", signal::thread_id(&entry.thread), entry.name),
                     Format::Json => println!("{}", contact_record(entry)),
                 }
             }
@@ -550,10 +550,11 @@ fn since_to_millis(spec: &str, now_ms: u64) -> anyhow::Result<u64> {
 
 fn chat_record(entry: &signal::ThreadEntry) -> serde_json::Value {
     serde_json::json!({
-        "id":        thread_id_string(&entry.thread),
+        "id":        signal::thread_id(&entry.thread),
         "name":      entry.name,
         "preview":   entry.last_preview,
         "timestamp": iso_timestamp(entry.last_ts),
+        "unread":    entry.unread,
     })
 }
 
@@ -562,12 +563,12 @@ fn contact_record(entry: &signal::ThreadEntry) -> serde_json::Value {
         Thread::Contact(_) => "contact",
         Thread::Group(_) => "group",
     };
-    serde_json::json!({ "id": thread_id_string(&entry.thread), "name": entry.name, "type": kind })
+    serde_json::json!({ "id": signal::thread_id(&entry.thread), "name": entry.name, "type": kind })
 }
 
 fn recent_record(m: &signal::RecentMessage) -> serde_json::Value {
     let mut record = message_record(m.ts, m.sender, &m.sender_name, &m.body, None);
-    record["chat_id"] = serde_json::Value::String(thread_id_string(&m.thread));
+    record["chat_id"] = serde_json::Value::String(signal::thread_id(&m.thread));
     record["chat_name"] = serde_json::Value::String(m.thread_name.clone());
     record["mentions_me"] = serde_json::Value::Bool(m.mentions_me);
     record
@@ -616,7 +617,7 @@ mod tests {
     fn json_records_keep_their_fields() {
         let thread = signal::parse_thread_id("11111111-1111-1111-1111-111111111111").unwrap();
         let entry = signal::ThreadEntry::new(thread.clone(), "Alice".to_string(), Some("hi".to_string()), 1_000);
-        assert_eq!(keys(&chat_record(&entry)), ["id", "name", "preview", "timestamp"]);
+        assert_eq!(keys(&chat_record(&entry)), ["id", "name", "preview", "timestamp", "unread"]);
         assert_eq!(keys(&contact_record(&entry)), ["id", "name", "type"]);
         assert_eq!(contact_record(&entry)["type"], "contact");
         assert_eq!(
@@ -654,19 +655,6 @@ mod tests {
         }
     }
 }
-
-fn thread_id_string(thread: &Thread) -> String {
-    match thread {
-        Thread::Contact(sid) => sid.raw_uuid().to_string(),
-        Thread::Group(key)   => hex_string(key),
-    }
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-// ── Thread parsing ────────────────────────────────────────────────────────────
 
 // ── Device linking ────────────────────────────────────────────────────────────
 

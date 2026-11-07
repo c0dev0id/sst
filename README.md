@@ -90,7 +90,7 @@ interface other tools parse; renaming one is a breaking change.
 
 | Command | Fields |
 |---------|--------|
-| `chats` | `id`, `name`, `preview`, `timestamp` |
+| `chats` | `id`, `name`, `preview`, `timestamp`, `unread` |
 | `contacts` | `id`, `name`, `type` (`contact` or `group`) |
 | `print`, `print-last`, `watch` | `timestamp`, `sender_uuid`, `sender_name`, `body`; `watch` adds `edit_of` on an edit |
 | `recent` | the message fields plus `chat_id`, `chat_name`, `mentions_me` |

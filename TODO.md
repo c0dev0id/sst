@@ -3,7 +3,6 @@
 ## Open tasks
 
 ### Unread tracking (input/display polish)
-- [ ] Unread flags live only in memory: opening a chat clears its flag, but nothing survives a restart. Needs a per-thread "last seen" timestamp persisted to disk. The same record would let read receipts go out once per message instead of for the whole thread on every open, and let `SyncMessage.read` from the phone clear the flag.
 - [ ] `── new ──` unread boundary separator in chat window
 - [ ] Unread visual treatment beyond the `*` prefix (bold/color — open design question)
 
@@ -12,7 +11,7 @@
 
 ### Signal parity
 - [ ] Delivery receipts: sst never sends `ReceiptMessage.DELIVERY`. The phone covers delivery state for the account, so impact is low, but linked desktop clients do send them.
-- [ ] Disappearing messages are never expired locally. Doing it right needs the per-message read time, which is the same persisted "last seen" record as unread tracking.
+- [ ] Disappearing messages are never expired locally. The per-thread last-seen mark is not enough: expiry needs the read time of each message.
 - [ ] `Received::Contacts` arriving mid-session is ignored; names refresh on restart only.
 - [ ] Signal caps edits at 10 per message; sst enforces the 24-hour window only.
 - [ ] `print --format=json` carries no quote, reactions or attachments; `print` does not mark edited messages.

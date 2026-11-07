@@ -132,7 +132,7 @@ pub struct App {
     pub threads: Vec<ThreadEntry>,
     pub list_state: ListState,
     pub status: Option<String>, // transient status line: completion candidates, errors, progress; cleared by the next key (Tab keeps it)
-    pub acked: HashSet<u64>,    // messages read-receipted this session
+    pub last_seen: signal::LastSeen, // newest message seen per thread; persisted
     pub quit: bool,
     pub view: View,
     pub chat: Option<ChatState>,
@@ -153,7 +153,7 @@ impl App {
             threads,
             list_state,
             status: None,
-            acked: HashSet::new(),
+            last_seen: signal::LastSeen::load(&data_dir),
             quit: false,
             view: View::ChatList,
             chat: None,
@@ -934,6 +934,15 @@ async fn next_or_pending(stream: &mut Option<Pin<Box<dyn Stream<Item = Received>
 
 /// Fold a live Signal event into the thread list and the open chat.
 async fn on_live_event<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>, received: &Received) {
+    // Reading on another device moves the mark and clears the marker here.
+    for (author, ts) in signal::read_sync(received) {
+        if let Some(thread) = signal::thread_of_message(manager, &author, ts).await {
+            app.last_seen.advance(&thread, ts);
+            if app.threads.iter().any(|e| e.thread == thread && e.last_ts <= ts) {
+                app.mark_read(&thread);
+            }
+        }
+    }
     if let Received::Content(content) = received {
         fold_live_message(app, manager, content).await;
     }
@@ -981,20 +990,25 @@ async fn handle_send_job<S: Store>(app: &mut App, manager: &mut Manager<S, Regis
     job.finish(result);
 }
 
-/// Send read receipts for the open chat's messages from others that have not
-/// been acknowledged this session, and remember them.
+/// Send read receipts for the open chat's messages from others newer than the
+/// last-seen mark, then move the mark to the newest message shown.
 async fn ack_unseen<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) {
     let Some(chat) = &app.chat else { return };
+    let seen_up_to = app.last_seen.get(&chat.thread);
     let unseen: Vec<(Uuid, u64)> = chat
         .messages
         .iter()
-        .filter(|m| !signal::is_own(m, app.own_aci) && !app.acked.contains(&m.timestamp()))
+        .filter(|m| m.timestamp() > seen_up_to && !signal::is_own(m, app.own_aci))
         .map(|m| (m.metadata.sender.raw_uuid(), m.timestamp()))
         .collect();
-    let stamps: Vec<u64> = unseen.iter().map(|(_, ts)| *ts).collect();
-    match signal::send_read_receipts(manager, unseen).await {
-        Ok(()) => app.acked.extend(stamps),
-        Err(e) => tracing::warn!("send_read_receipts: {e:#}"),
+    let newest = chat.messages.last().map(|m| m.timestamp());
+    let thread = chat.thread.clone();
+    if let Err(e) = signal::send_read_receipts(manager, unseen).await {
+        tracing::warn!("send_read_receipts: {e:#}");
+        return;
+    }
+    if let Some(ts) = newest {
+        app.last_seen.advance(&thread, ts);
     }
 }
 
@@ -1085,18 +1099,17 @@ async fn open_contact_browser<S: Store>(app: &mut App, manager: &mut Manager<S, 
 /// Close the chat and bring its list entry up to date: messages sent from the
 /// chat do not go through the live fold, so the preview is re-derived from the store.
 async fn leave_chat<S: Store>(app: &mut App, manager: &mut Manager<S, Registered>) -> anyhow::Result<()> {
-    if let Some(chat) = app.chat.take() {
-        let (preview, ts) = signal::last_message(manager, &chat.thread).await;
-        if ts > 0 {
-            match app.entry_mut(&chat.thread) {
-                Some(entry) => {
-                    entry.last_preview = preview;
-                    entry.last_ts = ts;
-                }
-                None => app.threads.push(ThreadEntry::new(chat.thread, chat.thread_name, preview, ts)),
+    if let Some(chat) = app.chat.take()
+        && let Some(latest) = signal::last_message(manager, &chat.thread).await
+    {
+        match app.entry_mut(&chat.thread) {
+            Some(entry) => {
+                entry.last_preview = Some(latest.preview);
+                entry.last_ts = latest.ts;
             }
-            signal::sort_recent_first(&mut app.threads);
+            None => app.threads.push(ThreadEntry::new(chat.thread, chat.thread_name, Some(latest.preview), latest.ts)),
         }
+        signal::sort_recent_first(&mut app.threads);
     }
     app.show_chat_list();
     Ok(())

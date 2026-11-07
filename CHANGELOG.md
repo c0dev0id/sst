@@ -43,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group chat sender blocks now show contact names instead of raw UUIDs; for group members not present in the local contact store, a Signal profile fetch is attempted using the profile key from the group roster
 
 ### Added
+- Unread markers survive restarts: a per-thread last-seen mark is kept on disk, read receipts go out once per message instead of for the whole chat on every open, reading a chat on your phone clears its marker in sst, and `sst chats --format=json` reports `unread`.
 - `sst recent` lists messages from other people across all chats since a point in time (`--since 2h`, `--since 7d` or an RFC 3339 timestamp; default 24h), oldest first, with the chat and sender and whether each message @-mentions you. `--mentions-me` keeps only those; `-n` keeps the newest N.
 - `sst send` hands the message to a running TUI or `sst watch` over a local socket (`sst.sock` in the data directory), so two processes never write Signal session state at the same time. With nothing running it sends directly as before, and it waits up to 30 seconds for an instance that is still starting. A message sent this way appears in the TUI immediately.
 - `sst send` turns `@Name` into a real mention like the TUI. `sst watch` prints edits as they arrive, marked `(edited)` in text output and with an `edit_of` field in JSON.
